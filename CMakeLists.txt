@@ -1,24 +1,22 @@
 cmake_minimum_required (VERSION 3.8...4.0.0 FATAL_ERROR)
 cmake_policy (SET CMP0155 NEW)
 
-set (PROJECT_DESCRIPTION "__lru__" CACHE STRING "project description")
+set (PROJECT_DESCRIPTION "ngr" CACHE STRING "project description")
 set_property (GLOBAL PROPERTY USE_FOLDERS ON)
 
-set (CMAKE_BUILD_TYPE Release CACHE STRING "build type" FORCE)
+set (CMAKE_BUILD_TYPE Debug CACHE STRING "build type" FORCE)
 
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     set (CMAKE_EXE_LINKER_FLAGS_DEBUG
          "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=address,undefined"
     )
-    # "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=thread"
 endif ()
 
-# set (VCPKG_TARGET_TRIPLET x64-linux CACHE STRING "VCPKG target triplet" FORCE)
 set (VCPKG_TARGET_TRIPLET x64-linux-clang-libcxx
      CACHE STRING "VCPKG target triplet" FORCE
 )
 
-project (__lru VERSION 0.1.0 LANGUAGES CXX C DESCRIPTION ${PROJECT_DESCRIPTION})
+project (ngr VERSION 0.1.0 LANGUAGES CXX C DESCRIPTION ${PROJECT_DESCRIPTION})
 
 enable_testing ()
 
@@ -36,11 +34,10 @@ if (CCACHE_FOUND)
     set (CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_FOUND})
 endif ()
 
-find_package (Boost REQUIRED COMPONENTS unordered intrusive)
 find_package (Catch2 CONFIG REQUIRED)
 find_package (benchmark CONFIG REQUIRED)
-
-# if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU") find_package (TBB REQUIRED) endif ()
+find_package (PkgConfig REQUIRED)
+pkg_check_modules (LIBURING REQUIRED liburing)
 
 file (
     GLOB_RECURSE
@@ -77,15 +74,12 @@ target_include_directories (
     ${PROJECT_NAME}
     PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
-            $<INSTALL_INTERFACE:include> source ${PROJECT_INCLUDE_DIRS}
+            $<INSTALL_INTERFACE:include>
+            source
+            ${PROJECT_INCLUDE_DIRS}
+            ${LIBURING_INCLUDE_DIRS}
 )
-target_link_libraries (
-    ${PROJECT_NAME} PRIVATE Boost::unordered Boost::intrusive
-)
-
-# if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU") target_link_libraries
-# (${PROJECT_NAME} PRIVATE TBB::tbb) target_link_options ( ${PROJECT_NAME}
-# PRIVATE -static-libstdc++ -static-libgcc ) endif ()
+target_link_libraries (${PROJECT_NAME} PRIVATE ${LIBURING_LIBRARIES})
 
 target_compile_options (
     ${PROJECT_NAME}
@@ -98,7 +92,6 @@ target_compile_options (
             $<$<CONFIG:Debug>:-g
             -fno-omit-frame-pointer
             -fsanitize=address,undefined
-            # -fsanitize=thread
             >
             $<$<CONFIG:Release>:-O3
             -march=native>
@@ -116,15 +109,15 @@ if (__TEST_SOURCES__)
         test_${PROJECT_NAME}
         PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
                 $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
-                $<INSTALL_INTERFACE:include> source ${PROJECT_INCLUDE_DIRS}
+                $<INSTALL_INTERFACE:include>
+                source
+                ${PROJECT_INCLUDE_DIRS}
+                ${LIBURING_INCLUDE_DIRS}
     )
     target_link_libraries (
         test_${PROJECT_NAME} PRIVATE Catch2::Catch2 Catch2::Catch2WithMain
+                                     ${LIBURING_LIBRARIES}
     )
-
-    # if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU") target_link_libraries
-    # (test_${PROJECT_NAME} PRIVATE TBB::tbb) target_link_options (
-    # test_${PROJECT_NAME} PRIVATE -static-libstdc++ -static-libgcc ) endif ()
 
     target_compile_options (
         test_${PROJECT_NAME}
@@ -138,7 +131,6 @@ if (__TEST_SOURCES__)
                 $<$<CONFIG:Debug>:-g
                 -fno-omit-frame-pointer
                 -fsanitize=address,undefined
-                # -fsanitize=thread
                 >
                 $<$<CONFIG:Release>:-O3
                 -march=native>
@@ -162,15 +154,15 @@ if (__BENCHMARK_SOURCES__)
         benchmark_${PROJECT_NAME}
         PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
                 $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
-                $<INSTALL_INTERFACE:include> source ${PROJECT_INCLUDE_DIRS}
+                $<INSTALL_INTERFACE:include>
+                source
+                ${PROJECT_INCLUDE_DIRS}
+                ${LIBURING_INCLUDE_DIRS}
     )
-    # if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU") target_link_libraries
-    # (benchmark_${PROJECT_NAME} PRIVATE TBB::tbb) target_link_options (
-    # benchmark_${PROJECT_NAME} PRIVATE -static-libstdc++ -static-libgcc ) endif
-    # ()
     target_link_libraries (
-        benchmark_${PROJECT_NAME} PRIVATE benchmark::benchmark
-                                          benchmark::benchmark_main
+        benchmark_${PROJECT_NAME}
+        PRIVATE benchmark::benchmark benchmark::benchmark_main
+                ${LIBURING_LIBRARIES}
     )
     target_compile_options (
         benchmark_${PROJECT_NAME}
@@ -183,7 +175,6 @@ if (__BENCHMARK_SOURCES__)
                 $<$<CONFIG:Debug>:-g
                 -fno-omit-frame-pointer
                 -fsanitize=address,undefined
-                # -fsanitize=thread
                 >
                 $<$<CONFIG:Release>:-O3
                 -march=native>
