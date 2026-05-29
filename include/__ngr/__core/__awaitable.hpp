@@ -16,6 +16,7 @@
 #include <cassert>
 
 #include <__ngr/__core/__aligned_storage.hpp>
+#include <__ngr/__core/__coro_destroy.hpp>
 #include <__ngr/__core/__stop_inplace.hpp>
 
 // NOLINTBEGIN(*-special-member-functions)
@@ -321,8 +322,7 @@ struct [[__nodiscard__]] __awaitable {
     auto operator=(__awaitable &&__that) noexcept -> __awaitable & = delete;
 
     ~__awaitable() noexcept {
-        if (__coro_ == nullptr) { return; }
-        __coro_.destroy();
+        if (__coro_) { __coro_destroy(__coro_); }
     }
 
     auto _M_request_stop() noexcept -> bool {
@@ -370,15 +370,14 @@ struct [[__nodiscard__]] __awaitable {
             auto await_suspend(std::coroutine_handle<__promise> __curr) noexcept
                 -> std::coroutine_handle<> {
                 __curr.promise().__fwd_._M_destroy();
-                auto __coro = __curr.promise().__continuation_;
-                return __coro ? __coro : std::noop_coroutine();
+                return __curr.promise().__continuation_;
             }
             void await_resume() const noexcept {}
         };
         using __forward_stop_request [[__gnu__::__nodebug__]] =
             __stop_callback<__forward_stop_request<>>;
-        std::coroutine_handle<>                   __continuation_{};
-        __stop_source                             __source_{};
+        std::coroutine_handle<> __continuation_ = std::noop_coroutine();
+        __stop_source           __source_{};
         __aligned_storage<__forward_stop_request> __fwd_;
 
         auto get_return_object() noexcept -> __awaitable {

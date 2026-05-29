@@ -12,10 +12,6 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     )
 endif ()
 
-set (VCPKG_TARGET_TRIPLET x64-linux-clang-libcxx
-     CACHE STRING "VCPKG target triplet" FORCE
-)
-
 project (ngr VERSION 0.1.0 LANGUAGES CXX C DESCRIPTION ${PROJECT_DESCRIPTION})
 
 enable_testing ()
@@ -33,11 +29,6 @@ find_program (CCACHE_FOUND ccache)
 if (CCACHE_FOUND)
     set (CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_FOUND})
 endif ()
-
-find_package (Catch2 CONFIG REQUIRED)
-find_package (benchmark CONFIG REQUIRED)
-find_package (PkgConfig REQUIRED)
-pkg_check_modules (LIBURING REQUIRED liburing)
 
 file (
     GLOB_RECURSE
@@ -76,10 +67,7 @@ target_include_directories (
             $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
             $<INSTALL_INTERFACE:include>
             source
-            ${PROJECT_INCLUDE_DIRS}
-            ${LIBURING_INCLUDE_DIRS}
 )
-target_link_libraries (${PROJECT_NAME} PRIVATE ${LIBURING_LIBRARIES})
 
 target_compile_options (
     ${PROJECT_NAME}
@@ -111,12 +99,6 @@ if (__TEST_SOURCES__)
                 $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
                 $<INSTALL_INTERFACE:include>
                 source
-                ${PROJECT_INCLUDE_DIRS}
-                ${LIBURING_INCLUDE_DIRS}
-    )
-    target_link_libraries (
-        test_${PROJECT_NAME} PRIVATE Catch2::Catch2 Catch2::Catch2WithMain
-                                     ${LIBURING_LIBRARIES}
     )
 
     target_compile_options (
@@ -156,13 +138,6 @@ if (__BENCHMARK_SOURCES__)
                 $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
                 $<INSTALL_INTERFACE:include>
                 source
-                ${PROJECT_INCLUDE_DIRS}
-                ${LIBURING_INCLUDE_DIRS}
-    )
-    target_link_libraries (
-        benchmark_${PROJECT_NAME}
-        PRIVATE benchmark::benchmark benchmark::benchmark_main
-                ${LIBURING_LIBRARIES}
     )
     target_compile_options (
         benchmark_${PROJECT_NAME}

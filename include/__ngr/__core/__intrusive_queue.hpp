@@ -7,10 +7,10 @@
 
 // NOLINTBEGIN(*-special-member-functions)
 namespace __ngr::inline __v0::__core {
-template <auto _Next> class __intrusive_queue;
+template <auto _Next> struct __intrusive_queue;
 
-template <class _Item, _Item *_Item::*_Next> class __intrusive_queue<_Next> {
-  public:
+template <typename _Item, _Item *_Item::*_Next>
+struct __intrusive_queue<_Next> {
     constexpr __intrusive_queue() noexcept = default;
 
     constexpr __intrusive_queue(__intrusive_queue &&__other) noexcept
@@ -165,7 +165,6 @@ template <class _Item, _Item *_Item::*_Next> class __intrusive_queue<_Next> {
 
     constexpr auto _M_back() const noexcept -> _Item * { return __tail_; }
 
-  private:
     _Item *__head_ = nullptr;
     _Item *__tail_ = nullptr;
 };
