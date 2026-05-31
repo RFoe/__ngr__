@@ -13,23 +13,24 @@ struct __stop_source;
 struct __stop_token;
 template <typename _Fn> struct __stop_callback;
 
-[[__gnu__::__always_inline__, __gnu__::__artificial__]]
-inline void _S_spin_loop_pause() noexcept {
-#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
-    ::_mm_pause();
-#elif defined(__i386__) || defined(__x86_64__) || defined(_M_X64)
-    __asm__ __volatile__("pause");
-#elif defined(__aarch64__) || defined(__arm__)
-    __asm__ __volatile__("yield");
-#elif defined(__powerpc64__)
-    __asm__ __volatile__("or 27,27,27");
-#endif
-}
 struct __pause_or_yield {
     static constexpr std::uint32_t __yield_threshold_ = 20;
     std::uint32_t                  __count_           = 0;
 
     constexpr __pause_or_yield() noexcept = default;
+    [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
+    inline static void _S_spin_loop_pause() noexcept {
+#if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
+        ::_mm_pause();
+#elif defined(__i386__) || defined(__x86_64__) || defined(_M_X64)
+        __asm__ __volatile__("pause");
+#elif defined(__aarch64__) || defined(__arm__)
+        __asm__ __volatile__("yield");
+#elif defined(__powerpc64__)
+        __asm__ __volatile__("or 27,27,27");
+#endif
+    }
+
     [[__gnu__::__always_inline__, __gnu__::__artificial__]]
     inline void _M_try() noexcept {
         if (__count_++ < __yield_threshold_) {

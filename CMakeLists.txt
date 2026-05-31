@@ -5,10 +5,10 @@ set (PROJECT_DESCRIPTION "ngr" CACHE STRING "project description")
 set_property (GLOBAL PROPERTY USE_FOLDERS ON)
 
 set (CMAKE_BUILD_TYPE Debug CACHE STRING "build type" FORCE)
-
+set (__SANTINIZER__ "-fsanitize=undefined")
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     set (CMAKE_EXE_LINKER_FLAGS_DEBUG
-         "${CMAKE_EXE_LINKER_FLAGS_DEBUG} -fsanitize=address,undefined"
+         "${CMAKE_EXE_LINKER_FLAGS_DEBUG} ${__SANTINIZER__}"
     )
 endif ()
 
@@ -65,8 +65,7 @@ target_include_directories (
     ${PROJECT_NAME}
     PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
-            $<INSTALL_INTERFACE:include>
-            source
+            $<INSTALL_INTERFACE:include> source
 )
 
 target_compile_options (
@@ -79,7 +78,7 @@ target_compile_options (
             /WX>
             $<$<CONFIG:Debug>:-g
             -fno-omit-frame-pointer
-            -fsanitize=address,undefined
+            ${__SANTINIZER__}
             >
             $<$<CONFIG:Release>:-O3
             -march=native>
@@ -97,8 +96,7 @@ if (__TEST_SOURCES__)
         test_${PROJECT_NAME}
         PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
                 $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
-                $<INSTALL_INTERFACE:include>
-                source
+                $<INSTALL_INTERFACE:include> source
     )
 
     target_compile_options (
@@ -112,7 +110,7 @@ if (__TEST_SOURCES__)
                 /WX>
                 $<$<CONFIG:Debug>:-g
                 -fno-omit-frame-pointer
-                -fsanitize=address,undefined
+                ${__SANTINIZER__}
                 >
                 $<$<CONFIG:Release>:-O3
                 -march=native>
@@ -136,8 +134,7 @@ if (__BENCHMARK_SOURCES__)
         benchmark_${PROJECT_NAME}
         PRIVATE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
                 $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
-                $<INSTALL_INTERFACE:include>
-                source
+                $<INSTALL_INTERFACE:include> source
     )
     target_compile_options (
         benchmark_${PROJECT_NAME}
@@ -149,7 +146,7 @@ if (__BENCHMARK_SOURCES__)
                 /WX>
                 $<$<CONFIG:Debug>:-g
                 -fno-omit-frame-pointer
-                -fsanitize=address,undefined
+                ${__SANTINIZER__}
                 >
                 $<$<CONFIG:Release>:-O3
                 -march=native>

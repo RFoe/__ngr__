@@ -87,6 +87,35 @@ struct __intrusive_queue<_Next> {
         __other.__head_ = nullptr;
     }
 
+    static constexpr auto _M_create_reversed(_Item *__list) noexcept
+        -> __intrusive_queue {
+        _Item *__new_head = nullptr;
+        _Item *__new_tail = __list;
+        while (__list != nullptr) {
+            _Item *__next  = __list->*_Next;
+            __list->*_Next = __new_head;
+            __new_head     = __list;
+            __list         = __next;
+        }
+
+        __intrusive_queue __result;
+        __result.__head_ = __new_head;
+        __result.__tail_ = __new_tail;
+        return __result;
+    }
+
+    static constexpr auto _M_create(_Item *__list) noexcept
+        -> __intrusive_queue {
+        __intrusive_queue __result{};
+        __result.__head_ = __list;
+        __result.__tail_ = __list;
+        if (__list == nullptr) { return __result; }
+        while (__result.__tail_->*_Next != nullptr) {
+            __result.__tail_ = __result.__tail_->*_Next;
+        }
+        return __result;
+    }
+
     struct iterator {
         using difference_type = std::ptrdiff_t;
         using value_type      = _Item *;

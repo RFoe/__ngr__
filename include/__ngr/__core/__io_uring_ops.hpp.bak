@@ -1,0 +1,909 @@
+#pragma once
+
+#include <netinet/in.h>
+#include <sys/socket.h>
+
+#include <chrono>
+#include <coroutine>
+#include <cstdint>
+#include <deque>
+
+#include <__ngr/__core/__aligned_storage.hpp>
+#include <__ngr/__core/__frame_allocator.hpp>
+#include <__ngr/__core/__io_uring_context.hpp>
+#include <__ngr/__core/__stop_inplace.hpp>
+
+// Awaitable io_uring operations for the pure __io_uring_context.
+//
+// Each awaiter lives inside a heap-allocated coroutine frame, so its address is
+// stable for the whole operation. The three "tricky" properties requested are
+// honoured:
+//
+//   1. Nothing is submitted from inside await_suspend. The awaiter only arms
+//   the
+//      thread-local deferred thunk (see __generic_task::_S_after_suspend) and
+//      returns noop_coroutine(); the driver runs the thunk on a clean stack.
+//   2. The main operation is submitted *before* the stop callback is wired up,
+//      binding to the awaiting coroutine's own stop source.
+//   3. A completed operation never races its own cancellation: an atomic
+//      __n_ops_ counter (kept from the original stdexec design) guarantees the
+//      coroutine is resumed exactly once, after the last in-flight CQE -- the
+//      main completion and, if a cancel was issued, the cancel completion.
+
+// NOLINTBEGIN(*-special-member-functions)
+namespace __ngr::inline __v0::__core {
+
+[[__gnu__::__always_inline__, __gnu__::__artificial__]]
+inline void _S_throw_if_negative(std::int32_t __res) {
+    if (__res < 0) [[__unlikely__]] {
+        throw std::system_error(-__res, std::system_category());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stoppable, one-shot operation base (CRTP).
+//
+// _Derived supplies:
+//   void   _M_sqe_prepare(::io_uring_sqe&) noexcept;   -- describe the
+//   operation
+// ---------------------------------------------------------------------------
+template <typename _Derived> struct __operation_base : __io_task {
+    __io_uring_context  *__context_;
+    const __stop_source *__stop_src_ = nullptr;
+    int                  __res_{};
+    std::uint32_t        __flags_{};
+    std::atomic<int>     __n_ops_{0};
+    // Non-null only when the awaiting promise is __frame_allocator-backed:
+    // points at the promise slot holding the chain's allocator across the
+    // suspension.
+    __frame_allocator **__saved_local_ = nullptr;
+    // IOSQE_* flags OR'd into the sqe after _M_sqe_prepare (e.g.
+    // IOSQE_FIXED_FILE so the op targets a registered file index rather than a
+    // raw fd).
+    std::uint8_t __sqe_flags_ = 0;
+
+    struct __on_stop {
+        __operation_base *__self_;
+        void operator()() const noexcept { __self_->_M_request_cancel(); }
+    };
+    __aligned_storage<__stop_callback<__on_stop>> __callback_;
+
+    // Cancellation sub-task. Submitted at most once, when a stop is requested.
+    struct __cancel_task : __io_task {
+        __operation_base *__owner_;
+
+        static auto __ready_(__io_task *) noexcept -> bool { return false; }
+
+        static void __submit_(__io_task *__p, ::io_uring_sqe &__sqe) noexcept {
+            auto             *__self = static_cast<__cancel_task *>(__p);
+            __operation_base &__op   = *__self->__owner_;
+            std::memset(&__sqe, 0, sizeof(__sqe));
+            __sqe.opcode = IORING_OP_ASYNC_CANCEL;
+            __sqe.addr = std::bit_cast<__u64>(static_cast<__io_task *>(&__op));
+        }
+
+        static void
+        __complete_(__io_task *__p, const ::io_uring_cqe &) noexcept {
+            auto *__self = static_cast<__cancel_task *>(__p);
+            __self->__owner_->_M_count_down();
+        }
+
+        static constexpr __io_task_vtable __vtable{
+            &__ready_, &__submit_, &__complete_};
+
+        explicit __cancel_task(__operation_base *__owner) noexcept
+            : __io_task{__vtable}, __owner_{__owner} {}
+    };
+    __cancel_task __cancel_{this};
+
+    static auto __ready_(__io_task *) noexcept -> bool { return false; }
+
+    static void __submit_(__io_task *__p, ::io_uring_sqe &__sqe) noexcept {
+        auto *__self = static_cast<__operation_base *>(__p);
+        __self->_M_derived()._M_sqe_prepare(__sqe);
+        __sqe.flags |= __self->__sqe_flags_;
+    }
+
+    static void
+    __complete_(__io_task *__p, const ::io_uring_cqe &__cqe) noexcept {
+        auto *__self = static_cast<__operation_base *>(__p);
+        // A pure notification CQE (send_zc NOTIF) carries no result; keep the
+        // earlier result instead of overwriting it.
+        if ((__cqe.flags & IORING_CQE_F_NOTIF) == 0U) {
+            __self->__res_   = __cqe.res;
+            __self->__flags_ = __cqe.flags;
+        }
+        // More CQEs are coming for this same submission (e.g. the send_zc
+        // result CQE precedes its NOTIF); do not count it down yet.
+        if ((__cqe.flags & IORING_CQE_F_MORE) != 0U) { return; }
+        __self->_M_count_down();
+    }
+
+    static constexpr __io_task_vtable __vtable{
+        &__ready_, &__submit_, &__complete_};
+
+    explicit __operation_base(__io_uring_context &__ctx) noexcept
+        : __io_task{__vtable}, __context_{&__ctx} {}
+
+    [[__gnu__::__always_inline__]]
+    auto _M_derived() noexcept -> _Derived & {
+        return *static_cast<_Derived *>(this);
+    }
+
+    // Opt into a registered file: the op's `fd` is then a registered-files
+    // index (see _M_register_files), skipping the kernel's per-op fd
+    // lookup/refcount. Fluent, returns the derived awaiter: `co_await
+    // async_recv(...)._M_fixed_file()`.
+    [[__nodiscard__]] auto _M_fixed_file() noexcept -> _Derived & {
+        __sqe_flags_ |= IOSQE_FIXED_FILE;
+        return _M_derived();
+    }
+
+    void _M_count_down() noexcept {
+        if (__n_ops_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            _M_finish();
+        }
+    }
+
+    void _M_finish() noexcept {
+        if (__stop_src_ != nullptr) { __callback_._M_destroy(); }
+        // Hand resumption to the executor (this op is the work item); the frame
+        // allocator is re-attached in await_resume on the resuming thread.
+        __context_->__scheduler_._M_enqueue(this);
+    }
+
+    // Runs from the deferred thunk (possibly off the driver thread): submit the
+    // main task via the thread-safe `_M_submit`, then arm the stop callback
+    // (submit-before-callback).
+    void _M_do_submit() noexcept {
+        __n_ops_.store(1, std::memory_order_relaxed);
+        __context_->_M_submit(static_cast<__io_task *>(this));
+        if (__stop_src_ != nullptr) {
+            __callback_._M_construct(
+                __stop_src_->_M_get_stop_token(), __on_stop{this});
+        }
+    }
+
+    void _M_request_cancel() noexcept {
+        int __expected = 1;
+        if (__n_ops_.compare_exchange_strong(
+                __expected, 2, std::memory_order_acq_rel)) {
+            __context_->_M_submit(&__cancel_);
+        }
+    }
+
+    // --- awaiter interface -------------------------------------------------
+    static auto await_ready() noexcept -> bool { return false; }
+
+    template <typename _Promise>
+    auto await_suspend(std::coroutine_handle<_Promise> __coro) noexcept
+        -> std::coroutine_handle<> {
+        __resume_ = __coro;
+        if constexpr (requires { __coro.promise().__source_; }) {
+            __stop_src_ = &__coro.promise().__source_;
+        }
+        // Detach the frame allocator from this thread; it is re-attached in
+        // await_resume on whichever thread resumes the chain.
+        if constexpr (requires { __coro.promise().__saved_fr_alloc_; }) {
+            __saved_local_ = &__coro.promise().__saved_fr_alloc_;
+            *__saved_local_ =
+                std::exchange(__frame_allocator::__local_, nullptr);
+        }
+        __generic_task::_S_after_suspend(
+            this, +[](void *__p) noexcept {
+                static_cast<__operation_base *>(__p)->_M_do_submit();
+            });
+        return std::noop_coroutine();
+    }
+
+    auto await_resume() -> int {
+        if (__saved_local_ != nullptr) {
+            __frame_allocator::__local_ = *__saved_local_;
+        }
+        return __res_;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Timeout (heap-backed)
+//
+// Unlike the io operations above, a timer is not handed to the kernel. It lives
+// in the context's timer heap and only the earliest deadline bounds each
+// io_uring_enter wait (see __io_uring_context::_M_run_once). Arming a timer is
+// a heap insert; cancelling it is a heap erase. Because, in the RPC workload,
+// most timers are cancelled before firing, this keeps the kernel out of the
+// common path entirely.
+//
+// The completion/cancellation arbitration mirrors __operation_base: an atomic
+// __n_ops_ guarantees the coroutine is resumed exactly once. A cancelled timer
+// resumes by throwing system_error(ECANCELED), matching the io operations.
+// ---------------------------------------------------------------------------
+// Derives from __io_task purely so the fired/cancelled timer can be handed to
+// the executor as a work item (its `__execute_` resumes the coroutine); the
+// io_uring submission/completion vtable slots are never used for a timer.
+struct __schedule_after_operation : __timer_task {
+    using __clock = __timer_task::__clock;
+
+    __io_uring_context  *__context_;
+    const __stop_source *__stop_src_ = nullptr;
+    std::atomic<int>     __n_ops_{0};
+    __frame_allocator  **__saved_local_ = nullptr;
+    __cancel_timer_task  __cancel_;
+
+    struct __on_stop {
+        __schedule_after_operation *__self_;
+        void operator()() const noexcept { __self_->_M_request_cancel(); }
+    };
+    __aligned_storage<__stop_callback<__on_stop>> __callback_;
+
+    // schedule node fired: the deadline elapsed normally.
+    static void _S_fire(__timer_task *__p) noexcept {
+        static_cast<__schedule_after_operation *>(__p)->_M_count_down();
+    }
+
+    __schedule_after_operation(
+        __io_uring_context &__ctx, __clock::time_point __deadline) noexcept
+        : __context_{&__ctx} {
+        this->__timer_task::__key_.__deadline_ = __deadline;
+        this->__timer_task::__key_.__seq_      = __ctx.__timer_seq_++;
+        this->__fire_                          = &_S_fire;
+        __cancel_.__command_                   = __command::__cancel;
+        __cancel_.__target_                    = this;
+    }
+
+    __schedule_after_operation(
+        __io_uring_context &__ctx, std::chrono::nanoseconds __dur) noexcept
+        : __schedule_after_operation{__ctx, __clock::now() + __dur} {}
+
+    void _M_count_down() noexcept {
+        if (__n_ops_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            if (__stop_src_ != nullptr) { __callback_._M_destroy(); }
+            // Hand this op to the executor as the resume work item; the frame
+            // allocator is restored in await_resume on the resuming thread.
+            __context_->__scheduler_._M_enqueue(this);
+        }
+    }
+
+    void _M_do_submit() noexcept {
+        __n_ops_.store(1, std::memory_order_relaxed);
+        __context_->_M_submit_timer(static_cast<__timer_task *>(this));
+        if (__stop_src_ != nullptr) {
+            __callback_._M_construct(
+                __stop_src_->_M_get_stop_token(), __on_stop{this});
+        }
+    }
+
+    void _M_request_cancel() noexcept {
+        int __expected = 1;
+        if (__n_ops_.compare_exchange_strong(
+                __expected, 2, std::memory_order_acq_rel)) {
+            __context_->_M_submit_timer(&__cancel_);
+        }
+    }
+
+    // --- awaiter interface -------------------------------------------------
+    static auto await_ready() noexcept -> bool { return false; }
+
+    template <typename _Promise>
+    auto await_suspend(std::coroutine_handle<_Promise> __coro) noexcept
+        -> std::coroutine_handle<> {
+        __generic_task::__resume_ = __coro;
+        if constexpr (requires { __coro.promise().__source_; }) {
+            __stop_src_ = &__coro.promise().__source_;
+        }
+        if constexpr (requires { __coro.promise().__saved_fr_alloc_; }) {
+            __saved_local_ = &__coro.promise().__saved_fr_alloc_;
+            *__saved_local_ =
+                std::exchange(__frame_allocator::__local_, nullptr);
+        }
+        __generic_task::_S_after_suspend(
+            this, +[](void *__p) noexcept -> void {
+                static_cast<__schedule_after_operation *>(__p)->_M_do_submit();
+            });
+        return std::noop_coroutine();
+    }
+
+    void await_resume() const noexcept {
+        if (__saved_local_ != nullptr) {
+            __frame_allocator::__local_ = *__saved_local_;
+        }
+    }
+};
+
+struct __recv_operation : __operation_base<__recv_operation> {
+    int   __fd_;
+    void *__buf_;
+    __u32 __len_;
+    int   __flags_;
+
+    __recv_operation(
+        __io_uring_context &__ctx, int __fd, void *__buf, std::size_t __len,
+        int __flags) noexcept
+        : __operation_base{__ctx}, __fd_{__fd}, __buf_{__buf},
+          __len_{static_cast<__u32>(__len)}, __flags_{__flags} {}
+
+    void _M_sqe_prepare(::io_uring_sqe &__sqe) noexcept {
+        __sqe           = ::io_uring_sqe{};
+        __sqe.opcode    = IORING_OP_RECV;
+        __sqe.fd        = __fd_;
+        __sqe.addr      = std::bit_cast<__u64>(__buf_);
+        __sqe.len       = __len_;
+        __sqe.msg_flags = static_cast<__u32>(__flags_);
+    }
+};
+
+struct __send_operation : __operation_base<__send_operation> {
+    int         __fd_;
+    const void *__buf_;
+    __u32       __len_;
+    int         __flags_;
+
+    __send_operation(
+        __io_uring_context &__ctx, int __fd, const void *__buf,
+        std::size_t __len, int __flags) noexcept
+        : __operation_base{__ctx}, __fd_{__fd}, __buf_{__buf},
+          __len_{static_cast<__u32>(__len)}, __flags_{__flags} {}
+
+    void _M_sqe_prepare(::io_uring_sqe &__sqe) noexcept {
+        __sqe           = ::io_uring_sqe{};
+        __sqe.opcode    = IORING_OP_SEND;
+        __sqe.fd        = __fd_;
+        __sqe.addr      = std::bit_cast<__u64>(__buf_);
+        __sqe.len       = __len_;
+        __sqe.msg_flags = static_cast<__u32>(__flags_);
+    }
+};
+
+struct __read_operation : __operation_base<__read_operation> {
+    int           __fd_;
+    void         *__buf_;
+    __u32         __len_;
+    std::uint64_t __offset_;
+    __u16         __buf_index_ = 0;
+    bool          __fixed_buf_ = false;
+
+    __read_operation(
+        __io_uring_context &__ctx, int __fd, void *__buf, std::size_t __len,
+        std::uint64_t __offset) noexcept
+        : __operation_base{__ctx}, __fd_{__fd}, __buf_{__buf},
+          __len_{static_cast<__u32>(__len)}, __offset_{__offset} {}
+
+    // Read into a registered buffer (see _M_register_buffers): uses
+    // IORING_OP_READ_FIXED so the kernel skips per-op page mapping.
+    // `__buf`/`__len` must lie inside registered buffer `__index`.
+    [[__nodiscard__]] auto _M_fixed_buffer(__u16 __index) noexcept
+        -> __read_operation & {
+        __buf_index_ = __index;
+        __fixed_buf_ = true;
+        return *this;
+    }
+
+    void _M_sqe_prepare(::io_uring_sqe &__sqe) noexcept {
+        __sqe        = ::io_uring_sqe{};
+        __sqe.opcode = __fixed_buf_ ? IORING_OP_READ_FIXED : IORING_OP_READ;
+        __sqe.fd     = __fd_;
+        __sqe.off    = __offset_;
+        __sqe.addr   = std::bit_cast<__u64>(__buf_);
+        __sqe.len    = __len_;
+        if (__fixed_buf_) { __sqe.buf_index = __buf_index_; }
+    }
+};
+
+struct __write_operation : __operation_base<__write_operation> {
+    int           __fd_;
+    const void   *__buf_;
+    __u32         __len_;
+    std::uint64_t __offset_;
+    __u16         __buf_index_ = 0;
+    bool          __fixed_buf_ = false;
+
+    __write_operation(
+        __io_uring_context &__ctx, int __fd, const void *__buf,
+        std::size_t __len, std::uint64_t __offset) noexcept
+        : __operation_base{__ctx}, __fd_{__fd}, __buf_{__buf},
+          __len_{static_cast<__u32>(__len)}, __offset_{__offset} {}
+
+    // Write from a registered buffer (IORING_OP_WRITE_FIXED).
+    [[__nodiscard__]] auto _M_fixed_buffer(__u16 __index) noexcept
+        -> __write_operation & {
+        __buf_index_ = __index;
+        __fixed_buf_ = true;
+        return *this;
+    }
+
+    void _M_sqe_prepare(::io_uring_sqe &__sqe) noexcept {
+        __sqe        = ::io_uring_sqe{};
+        __sqe.opcode = __fixed_buf_ ? IORING_OP_WRITE_FIXED : IORING_OP_WRITE;
+        __sqe.fd     = __fd_;
+        __sqe.off    = __offset_;
+        __sqe.addr   = std::bit_cast<__u64>(__buf_);
+        __sqe.len    = __len_;
+        if (__fixed_buf_) { __sqe.buf_index = __buf_index_; }
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Zero-copy send. The result CQE (bytes sent, carrying IORING_CQE_F_MORE) is
+// followed by a NOTIF CQE once the kernel no longer references the buffer; the
+// base's F_MORE/F_NOTIF handling waits for both before resuming, so the buffer
+// is safe to reuse the moment the coroutine resumes.
+// ---------------------------------------------------------------------------
+struct __send_zc_operation : __operation_base<__send_zc_operation> {
+    int         __fd_;
+    const void *__buf_;
+    __u32       __len_;
+    int         __flags_;
+
+    __send_zc_operation(
+        __io_uring_context &__ctx, int __fd, const void *__buf,
+        std::size_t __len, int __flags) noexcept
+        : __operation_base{__ctx}, __fd_{__fd}, __buf_{__buf},
+          __len_{static_cast<__u32>(__len)}, __flags_{__flags} {}
+
+    void _M_sqe_prepare(::io_uring_sqe &__sqe) noexcept {
+        __sqe           = ::io_uring_sqe{};
+        __sqe.opcode    = IORING_OP_SEND_ZC;
+        __sqe.fd        = __fd_;
+        __sqe.addr      = std::bit_cast<__u64>(__buf_);
+        __sqe.len       = __len_;
+        __sqe.msg_flags = static_cast<__u32>(__flags_);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// sendmsg / recvmsg -- the message-oriented socket ops. Preferred over
+// read/write for the network path: they carry a scatter/gather `iovec` list,
+// an optional peer address (`msg_name`), and ancillary control data
+// (`msg_control`, e.g. SCM_RIGHTS / packet info). The caller owns the
+// `::msghdr` and everything it points at; it must outlive the operation -- a
+// `msghdr` local in the awaiting coroutine satisfies this, as the frame stays
+// alive across the suspension. recvmsg takes a non-const `msghdr*` so the
+// kernel can write back `msg_namelen`, `msg_controllen` and `msg_flags`.
+// ---------------------------------------------------------------------------
+struct __sendmsg_operation : __operation_base<__sendmsg_operation> {
+    int             __fd_;
+    const ::msghdr *__msg_;
+    int             __flags_;
+
+    __sendmsg_operation(
+        __io_uring_context &__ctx, int __fd, const ::msghdr *__msg,
+        int __flags) noexcept
+        : __operation_base{__ctx}, __fd_{__fd}, __msg_{__msg},
+          __flags_{__flags} {}
+
+    void _M_sqe_prepare(::io_uring_sqe &__sqe) noexcept {
+        __sqe           = ::io_uring_sqe{};
+        __sqe.opcode    = IORING_OP_SENDMSG;
+        __sqe.fd        = __fd_;
+        __sqe.addr      = std::bit_cast<__u64>(__msg_);
+        __sqe.len       = 1;
+        __sqe.msg_flags = static_cast<__u32>(__flags_);
+    }
+};
+
+struct __recvmsg_operation : __operation_base<__recvmsg_operation> {
+    int       __fd_;
+    ::msghdr *__msg_;
+    int       __flags_;
+
+    __recvmsg_operation(
+        __io_uring_context &__ctx, int __fd, ::msghdr *__msg,
+        int __flags) noexcept
+        : __operation_base{__ctx}, __fd_{__fd}, __msg_{__msg},
+          __flags_{__flags} {}
+
+    void _M_sqe_prepare(::io_uring_sqe &__sqe) noexcept {
+        __sqe           = ::io_uring_sqe{};
+        __sqe.opcode    = IORING_OP_RECVMSG;
+        __sqe.fd        = __fd_;
+        __sqe.addr      = std::bit_cast<__u64>(__msg_);
+        __sqe.len       = 1;
+        __sqe.msg_flags = static_cast<__u32>(__flags_);
+    }
+};
+
+// ---------------------------------------------------------------------------
+// accept / connect / close
+// ---------------------------------------------------------------------------
+struct __accept_operation : __operation_base<__accept_operation> {
+    int                __fd_;
+    int                __flags_;
+    ::sockaddr_storage __addr_{};
+    ::socklen_t        __addrlen_ = sizeof(::sockaddr_storage);
+
+    __accept_operation(
+        __io_uring_context &__ctx, int __fd, int __flags) noexcept
+        : __operation_base{__ctx}, __fd_{__fd}, __flags_{__flags} {}
+
+    void _M_sqe_prepare(::io_uring_sqe &__sqe) noexcept {
+        __sqe              = ::io_uring_sqe{};
+        __sqe.opcode       = IORING_OP_ACCEPT;
+        __sqe.fd           = __fd_;
+        __sqe.addr         = std::bit_cast<__u64>(&__addr_);
+        __sqe.off          = std::bit_cast<__u64>(&__addrlen_);
+        __sqe.accept_flags = static_cast<__u32>(__flags_);
+    }
+
+    [[__nodiscard__]] auto _M_peer() const noexcept -> const ::sockaddr * {
+        return reinterpret_cast<const ::sockaddr *>(&__addr_);
+    }
+
+    [[__nodiscard__]] auto _M_peer_len() const noexcept -> ::socklen_t {
+        return __addrlen_;
+    }
+};
+
+struct __connect_operation : __operation_base<__connect_operation> {
+    int                __fd_;
+    ::sockaddr_storage __addr_{};
+    ::socklen_t        __addrlen_;
+
+    __connect_operation(
+        __io_uring_context &__ctx, int __fd, const ::sockaddr *__addr,
+        ::socklen_t __addrlen) noexcept
+        : __operation_base{__ctx}, __fd_{__fd}, __addrlen_{__addrlen} {
+        std::memcpy(&__addr_, __addr, __addrlen);
+    }
+
+    void _M_sqe_prepare(::io_uring_sqe &__sqe) noexcept {
+        __sqe        = ::io_uring_sqe{};
+        __sqe.opcode = IORING_OP_CONNECT;
+        __sqe.fd     = __fd_;
+        __sqe.addr   = std::bit_cast<__u64>(&__addr_);
+        __sqe.off    = __addrlen_;
+    }
+};
+
+struct __close_operation : __operation_base<__close_operation> {
+    int __fd_;
+
+    __close_operation(__io_uring_context &__ctx, int __fd) noexcept
+        : __operation_base{__ctx}, __fd_{__fd} {}
+
+    void _M_sqe_prepare(::io_uring_sqe &__sqe) noexcept {
+        __sqe        = ::io_uring_sqe{};
+        __sqe.opcode = IORING_OP_CLOSE;
+        __sqe.fd     = __fd_;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Multishot operations.
+//
+// A single submission yields a stream of CQEs (each carrying IORING_CQE_F_MORE)
+// until a terminal CQE arrives without F_MORE. Modelled as an async stream:
+// each `co_await stream.next()` resolves to the next CQE result. Because CQEs
+// may be reaped while the consuming coroutine is busy elsewhere, completions
+// are buffered. Multishot results are *not* thrown -- terminal/error conditions
+// are part of the stream protocol and reported in the result value.
+// ---------------------------------------------------------------------------
+struct __multishot_result {
+    std::int32_t  __res;
+    std::uint32_t __flags;
+
+    [[__nodiscard__]] auto _M_ok() const noexcept -> bool { return __res >= 0; }
+    [[__nodiscard__]] auto _M_more() const noexcept -> bool {
+        return (__flags & IORING_CQE_F_MORE) != 0U;
+    }
+    [[__nodiscard__]] auto _M_has_buffer() const noexcept -> bool {
+        return (__flags & IORING_CQE_F_BUFFER) != 0U;
+    }
+    [[__nodiscard__]] auto _M_buffer_id() const noexcept -> __u16 {
+        return static_cast<__u16>(__flags >> IORING_CQE_BUFFER_SHIFT);
+    }
+};
+
+template <typename _Derived> struct __multishot_base : __io_task {
+    __io_uring_context            *__context_;
+    const __stop_source           *__stop_src_ = nullptr;
+    std::deque<__multishot_result> __ready_q_{};
+    std::atomic<int>               __n_ops_{0};
+    bool                           __stream_open_ = true;
+    std::uint8_t                   __sqe_flags_   = 0; // e.g. IOSQE_FIXED_FILE
+
+    struct __on_stop {
+        __multishot_base *__self_;
+        void operator()() const noexcept { __self_->_M_request_cancel(); }
+    };
+    __aligned_storage<__stop_callback<__on_stop>> __callback_;
+
+    struct __cancel_task : __io_task {
+        __multishot_base *__owner_;
+
+        static auto __ready_(__io_task *) noexcept -> bool { return false; }
+        static void __submit_(__io_task *__p, ::io_uring_sqe &__sqe) noexcept {
+            auto *__self = static_cast<__cancel_task *>(__p);
+            std::memset(&__sqe, 0, sizeof(__sqe));
+            __sqe.opcode = IORING_OP_ASYNC_CANCEL;
+            __sqe.addr   = std::bit_cast<__u64>(
+                static_cast<__io_task *>(__self->__owner_));
+        }
+        static void
+        __complete_(__io_task *__p, const ::io_uring_cqe &) noexcept {
+            static_cast<__cancel_task *>(__p)->__owner_->_M_count_down();
+        }
+        static constexpr __io_task_vtable __vtable{
+            &__ready_, &__submit_, &__complete_};
+        explicit __cancel_task(__multishot_base *__o) noexcept
+            : __io_task{__vtable}, __owner_{__o} {}
+    };
+    __cancel_task __cancel_{this};
+
+    static auto __ready_(__io_task *) noexcept -> bool { return false; }
+
+    static void __submit_(__io_task *__p, ::io_uring_sqe &__sqe) noexcept {
+        auto *__self = static_cast<__multishot_base *>(__p);
+        __self->_M_derived()._M_sqe_prepare(__sqe);
+        __sqe.flags |= __self->__sqe_flags_;
+    }
+
+    static void
+    __complete_(__io_task *__p, const ::io_uring_cqe &__cqe) noexcept {
+        auto *__self = static_cast<__multishot_base *>(__p);
+        __self->__ready_q_.push_back({__cqe.res, __cqe.flags});
+        if ((__cqe.flags & IORING_CQE_F_MORE) != 0U) {
+            // Non-terminal: deliver this item to a parked consumer.
+            __self->_M_dispatch_resume();
+            return;
+        }
+        // Terminal CQE: the multishot op is done. Resume only once the op is
+        // fully settled -- if a cancel is in flight (__n_ops_ == 2) the resume
+        // is deferred to the cancel completion, exactly like the single-shot
+        // ops, so the awaiter is never torn down while a cancel CQE is still
+        // pending.
+        __self->__stream_open_ = false;
+        __self->_M_count_down();
+    }
+
+    static constexpr __io_task_vtable __vtable{
+        &__ready_, &__submit_, &__complete_};
+
+    explicit __multishot_base(__io_uring_context &__ctx) noexcept
+        : __io_task{__vtable}, __context_{&__ctx} {}
+
+    [[__gnu__::__always_inline__]]
+    auto _M_derived() noexcept -> _Derived & {
+        return *static_cast<_Derived *>(this);
+    }
+
+    // Opt into a registered file (the op's fd becomes a registered-files
+    // index).
+    [[__nodiscard__]] auto _M_fixed_file() noexcept -> _Derived & {
+        __sqe_flags_ |= IOSQE_FIXED_FILE;
+        return _M_derived();
+    }
+
+    // Hand the parked consumer (if any) to the executor for resumption. Nulling
+    // `__resume_` before dispatch makes this single-shot: a second CQE arriving
+    // before the consumer runs only buffers (it re-parks itself once resumed),
+    // so the op is never enqueued onto the executor twice.
+    void _M_dispatch_resume() noexcept {
+        if (__resume_) {
+            __resume_ = std::exchange(__resume_, {});
+            __context_->__scheduler_._M_enqueue(this);
+        }
+    }
+
+    void _M_count_down() noexcept {
+        if (__n_ops_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            if (__stop_src_ != nullptr) { __callback_._M_destroy(); }
+            _M_dispatch_resume();
+        }
+    }
+
+    void _M_do_submit() noexcept {
+        __n_ops_.store(1, std::memory_order_relaxed);
+        __context_->_M_submit(static_cast<__io_task *>(this));
+        if (__stop_src_ != nullptr) {
+            __callback_._M_construct(
+                __stop_src_->_M_get_stop_token(), __on_stop{this});
+        }
+    }
+
+    void _M_request_cancel() noexcept {
+        int __expected = 1;
+        if (__n_ops_.compare_exchange_strong(
+                __expected, 2, std::memory_order_acq_rel)) {
+            __context_->_M_submit(&__cancel_);
+        }
+    }
+
+    // The awaiter returned by next().
+    struct __next_awaiter {
+        __multishot_base *__self_;
+        // See __operation_base::__saved_local_.
+        __frame_allocator **__saved_local_ = nullptr;
+
+        // A buffered result lets us resume without suspending. Before the first
+        // submission the queue is necessarily empty, so this also forces the
+        // initial suspend that arms the operation.
+        auto await_ready() const noexcept -> bool {
+            return !__self_->__ready_q_.empty();
+        }
+
+        template <typename _Promise>
+        auto await_suspend(std::coroutine_handle<_Promise> __coro) noexcept
+            -> std::coroutine_handle<> {
+            __self_->__resume_ = __coro;
+            // Detach the frame allocator for the duration of the suspension; it
+            // is restored in await_resume on the resuming thread.
+            if constexpr (requires { __coro.promise().__saved_fr_alloc_; }) {
+                __saved_local_ = &__coro.promise().__saved_fr_alloc_;
+                *__saved_local_ =
+                    std::exchange(__frame_allocator::__local_, nullptr);
+            }
+            // `__n_ops_ == 0` means the multishot op has not been submitted
+            // yet, i.e. this is the first `next()`. Submit once; later awaits
+            // only park to wait for the next buffered completion.
+            if (__self_->__n_ops_.load(std::memory_order_acquire) == 0) {
+                if constexpr (requires { __coro.promise().__source_; }) {
+                    __self_->__stop_src_ = &__coro.promise().__source_;
+                }
+                __generic_task::_S_after_suspend(
+                    __self_, +[](void *__p) noexcept {
+                        static_cast<__multishot_base *>(__p)->_M_do_submit();
+                    });
+            }
+            return std::noop_coroutine();
+        }
+
+        auto await_resume() noexcept -> __multishot_result {
+            if (__saved_local_ != nullptr) {
+                __frame_allocator::__local_ = *__saved_local_;
+            }
+            __multishot_result __r = __self_->__ready_q_.front();
+            __self_->__ready_q_.pop_front();
+            return __r;
+        }
+    };
+
+    [[__nodiscard__]] auto next() noexcept -> __next_awaiter { return {this}; }
+
+    [[__nodiscard__]] auto _M_stream_open() const noexcept -> bool {
+        return __stream_open_ || !__ready_q_.empty();
+    }
+};
+
+struct __accept_multishot_operation
+    : __multishot_base<__accept_multishot_operation> {
+    int __fd_;
+    int __flags_;
+
+    __accept_multishot_operation(
+        __io_uring_context &__ctx, int __fd, int __flags) noexcept
+        : __multishot_base{__ctx}, __fd_{__fd}, __flags_{__flags} {}
+
+    void _M_sqe_prepare(::io_uring_sqe &__sqe) noexcept {
+        __sqe              = ::io_uring_sqe{};
+        __sqe.opcode       = IORING_OP_ACCEPT;
+        __sqe.fd           = __fd_;
+        __sqe.accept_flags = static_cast<__u32>(__flags_);
+        __sqe.ioprio       = IORING_ACCEPT_MULTISHOT;
+    }
+};
+
+struct __recv_multishot_operation
+    : __multishot_base<__recv_multishot_operation> {
+    int   __fd_;
+    __u16 __bgid_;
+    int   __flags_;
+
+    __recv_multishot_operation(
+        __io_uring_context &__ctx, int __fd, __u16 __bgid, int __flags) noexcept
+        : __multishot_base{__ctx}, __fd_{__fd}, __bgid_{__bgid},
+          __flags_{__flags} {}
+
+    void _M_sqe_prepare(::io_uring_sqe &__sqe) noexcept {
+        __sqe           = ::io_uring_sqe{};
+        __sqe.opcode    = IORING_OP_RECV;
+        __sqe.fd        = __fd_;
+        __sqe.msg_flags = static_cast<__u32>(__flags_);
+        __sqe.ioprio    = IORING_RECV_MULTISHOT;
+        __sqe.flags     = IOSQE_BUFFER_SELECT;
+        __sqe.buf_group = __bgid_;
+    }
+};
+
+// ---------------------------------------------------------------------------
+// Factory functions: `co_await async_xxx(ctx, ...)`.
+// ---------------------------------------------------------------------------
+[[__nodiscard__]]
+inline auto async_sleep_for(
+    __io_uring_context &__ctx, std::chrono::nanoseconds __dur) noexcept
+    -> __schedule_after_operation {
+    return {__ctx, __dur};
+}
+
+[[__nodiscard__]]
+inline auto async_sleep_until(
+    __io_uring_context                   &__ctx,
+    std::chrono::steady_clock::time_point __deadline) noexcept
+    -> __schedule_after_operation {
+    return {__ctx, __deadline};
+}
+
+[[__nodiscard__]]
+inline auto async_recv(
+    __io_uring_context &__ctx, int __fd, void *__buf, std::size_t __len,
+    int __flags = 0) noexcept -> __recv_operation {
+    return {__ctx, __fd, __buf, __len, __flags};
+}
+
+[[__nodiscard__]]
+inline auto async_send(
+    __io_uring_context &__ctx, int __fd, const void *__buf, std::size_t __len,
+    int __flags = 0) noexcept -> __send_operation {
+    return {__ctx, __fd, __buf, __len, __flags};
+}
+
+[[__nodiscard__]]
+inline auto async_read(
+    __io_uring_context &__ctx, int __fd, void *__buf, std::size_t __len,
+    std::uint64_t __offset = 0) noexcept -> __read_operation {
+    return {__ctx, __fd, __buf, __len, __offset};
+}
+
+[[__nodiscard__]]
+inline auto async_write(
+    __io_uring_context &__ctx, int __fd, const void *__buf, std::size_t __len,
+    std::uint64_t __offset = 0) noexcept -> __write_operation {
+    return {__ctx, __fd, __buf, __len, __offset};
+}
+
+[[__nodiscard__]]
+inline auto async_send_zc(
+    __io_uring_context &__ctx, int __fd, const void *__buf, std::size_t __len,
+    int __flags = 0) noexcept -> __send_zc_operation {
+    return {__ctx, __fd, __buf, __len, __flags};
+}
+
+[[__nodiscard__]]
+inline auto async_sendmsg(
+    __io_uring_context &__ctx, int __fd, const ::msghdr *__msg,
+    int __flags = 0) noexcept -> __sendmsg_operation {
+    return {__ctx, __fd, __msg, __flags};
+}
+
+[[__nodiscard__]]
+inline auto async_recvmsg(
+    __io_uring_context &__ctx, int __fd, ::msghdr *__msg,
+    int __flags = 0) noexcept -> __recvmsg_operation {
+    return {__ctx, __fd, __msg, __flags};
+}
+
+[[__nodiscard__]]
+inline auto
+async_accept(__io_uring_context &__ctx, int __fd, int __flags = 0) noexcept
+    -> __accept_operation {
+    return {__ctx, __fd, __flags};
+}
+
+[[__nodiscard__]]
+inline auto async_connect(
+    __io_uring_context &__ctx, int __fd, const ::sockaddr *__addr,
+    ::socklen_t __addrlen) noexcept -> __connect_operation {
+    return {__ctx, __fd, __addr, __addrlen};
+}
+
+[[__nodiscard__]]
+inline auto async_close(__io_uring_context &__ctx, int __fd) noexcept
+    -> __close_operation {
+    return {__ctx, __fd};
+}
+
+[[__nodiscard__]]
+inline auto async_accept_multishot(
+    __io_uring_context &__ctx, int __fd, int __flags = 0) noexcept
+    -> __accept_multishot_operation {
+    return {__ctx, __fd, __flags};
+}
+
+[[__nodiscard__]]
+inline auto async_recv_multishot(
+    __io_uring_context &__ctx, int __fd, __u16 __bgid, int __flags = 0) noexcept
+    -> __recv_multishot_operation {
+    return {__ctx, __fd, __bgid, __flags};
+}
+
+} // namespace __ngr::inline __v0::__core
+// NOLINTEND(*-special-member-functions)

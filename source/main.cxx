@@ -1,27 +1,26 @@
-#include <__ngr/__core/__awaitable.hpp>
-#include <__ngr/__core/__exit.hpp>
-#include <print>
+#include <__ngr/__core/__task.hpp>
+#include <cstdio>
+#include <unistd.h>
 
-using namespace __ngr::__core; // NOLINT
+using namespace __ngr::__core;
 
 namespace {
 
-auto __coro() noexcept -> __awaitable<void> {
-    std::println("__coro: co_return");
-    co_return;
+template <std::size_t _Np> void _S_print(const char (&__msg)[_Np]) noexcept {
+    ::write(fileno(stdout), __msg, _Np);
 }
+
+auto __async_coro(int __n) -> __task<> {
+    _S_print("coro\n");
+    if (__n < 10) { co_await __async_coro(__n + 1); }
+    if (__n < 10) { co_await __async_coro(__n + 1); }
+};
 
 } // namespace
 
 auto main() -> int {
-    auto __c    = __coro();
-    auto __h    = __c.__coro_;
-    auto __exit = __exit_(
-        [](__awaitable<void> &) noexcept -> void {
-            std::println("destroy __c");
-        },
-        std::move(__c));
-    __exit.await_suspend(__h);
-    __exit.await_resume();
-    __h.resume();
+    _S_print("A\n");
+    auto __h = __async_coro(0);
+    __h.__coro_.resume();
+    _S_print("B\n");
 }
