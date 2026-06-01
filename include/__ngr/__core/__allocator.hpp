@@ -1,6 +1,7 @@
 #ifndef FRAME_ALLOCATOR_H
 #define FRAME_ALLOCATOR_H
 
+#include <__new/global_new_delete.h>
 #include <__new/placement_new_delete.h>
 #include <__ngr/__core/__round_up.hpp>
 
@@ -35,7 +36,7 @@ struct __allocator {
         std::size_t __cur_cap = __next_cap_ < __hint ? __hint : __next_cap_;
         std::size_t __n       = sizeof(__chunk_prefix) + __cur_cap;
 
-        void *__vptr      = ::operator new(__n);
+        void *__vptr      = ::operator new(__n, std::nothrow);
         auto *__chunk     = static_cast<__chunk_prefix *>(__vptr);
         __chunk->__next_  = nullptr;
         __chunk->__limit_ = static_cast<char *>(__vptr) + __n;
@@ -50,12 +51,12 @@ struct __allocator {
         return __chunk;
     }
 
-    explicit __allocator()      = default;
-    __allocator(__allocator &&) = delete;
+    explicit __allocator() noexcept = default;
+    __allocator(__allocator &&)     = delete;
     ~__allocator() noexcept {
         for (__chunk_prefix *__h = __chunk_; __h != nullptr;) {
             __chunk_prefix *__tmp = __h->__next_;
-            ::operator delete(__h);
+            ::operator delete(__h, std::nothrow);
             __h = __tmp;
         }
     }

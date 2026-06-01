@@ -1,0 +1,55 @@
+io_uring的一些优化 
+
+IORING_FEAT_SINGLE_MMAP
+SQ + CQ
+
+IORING_OP_ASYNC_CANCEL
+zombie I/O event(CQE after socket closed)
+
+eventfd vs pipe
+
+SQPOLL sq_thread_cpu sq_thread_idle 
+
+timerfd/timerfd_settime vs IORING_OP_TIMEOUT/IORING_OP_TIMEOUT_REMOVE
+
+io_uring_register_buffers io_uring_register_files
+buffer pool -> fixed buffer index 
+client socket registeration
+
+ring buffer pool + IOSQE_BUFFER_SELECT
+N buffer -> buffer group
+
+IOSQE_IO_LINK
+header -> body -> timeout
+SQE1: IORING_OP_ACCEPT ==link== SQE2: IORING_OP_RECV (save first event loop)
+
+IORING_OP_SEND_ZC / IORING_OP_SENDMSG_ZC
+protobuf/flatbuffers > 4KB
+BIG PACKAGE RESPONSE / batch query
+CQE 回来时 buffer 可能还没发完（网卡还在 DMA），需要等 notification CQE 才能释放 buffer
+sendmsg iovec
+recvmsg iovec (knows how many iovec are used)
+io bufer COW chunk-based buffer list, thread local buffer pool(类似tcmalloc, freelist, TLS 做热路径无锁，全局做冷路径有锁，摊销锁开销)
+
+一些值得注意的点
+
+trace __n_total_submit_
+trace __n_newly_submit_
+atomic ref
+IORING_SQ_CQ_OVERFLOW  back-pressure 
+cq_entries 为 sq_entries 的 2~4 倍；或者 IORING_SETUP_CQ_NODROP
+连接关闭但还有 pending recv/send → 必须先 ASYNC_CANCEL 再 close
+Buffer 被回收到池子并重新分配 → 但旧 CQE 还没回来 → 数据覆盖
+sqe->user_data index/generation 或 intrusive refcount/packed struct
+res == 0 对 recv → 对端关闭（不是错误！）
+res == -ECANCELED → 被 ASYNC_CANCEL 取消的，正常路径
+res == -EAGAIN → SQPOLL 模式下可能出现，需要重试）（塞回去，IORING_ENTER_SQ_WAKEUP ）
+res == -ENOBUFS → buffer ring 空了，所有 buffer 都在用
+RPC 框架要做 feature probing：io_uring_probe 探测支持的 op，graceful fallback。
+Connection 上可能同时有：
+  - 1 个 pending RECV
+  - 1 个 pending SEND  
+  - 1 个 pending TIMEOUT
+
+close 时必须等所有 CQE 都回来（或 cancel 成功）才能销毁 Connection。
+方案：每提交一个 SQE → ref_count++；每收到一个 CQE → ref_count--；减到 0 才真正 destroy。

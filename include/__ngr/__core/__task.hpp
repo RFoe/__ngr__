@@ -12,7 +12,7 @@
 #include <__ngr/__core/__aligned_storage.hpp>
 #include <__ngr/__core/__allocator.hpp>
 #include <__ngr/__core/__coro_destroy.hpp>
-#include <__ngr/__core/__generic_coro_task.hpp>
+#include <__ngr/__core/__generic_task.hpp>
 #include <__ngr/__core/__stop_inplace.hpp>
 
 // NOLINTBEGIN(*-special-member-functions)
@@ -194,7 +194,7 @@ struct [[__nodiscard__]] __task {
     struct __promise final
         : public __promise_storage<_Ty>
         , public __promise_alloc
-        , public __promise_save_local_alloc
+        , public __promise_saved_fr_alloc_wrapper
         , public __promise_base {
         void unhandled_exception() noexcept {
             __promise_storage<_Ty>::_M_set_exception(std::current_exception());

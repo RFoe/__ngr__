@@ -1,5 +1,13 @@
 #pragma once
-
+#ifndef __NR_io_uring_setup
+    #define __NR_io_uring_setup 425
+#endif
+#ifndef __NR_io_uring_enter
+    #define __NR_io_uring_enter 426
+#endif
+#ifndef __NR_io_uring_register
+    #define __NR_io_uring_register 427
+#endif
 #include <linux/io_uring.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -11,7 +19,7 @@
 #include <__system_error/system_error.h>
 
 #include <__ngr/__core/__file_descriptor.hpp>
-#include <__ngr/__core/__generic_coro_task.hpp>
+#include <__ngr/__core/__generic_task.hpp>
 #include <__ngr/__core/__intrusive_heap.hpp>
 #include <__ngr/__core/__memory_mapped_region.hpp>
 
