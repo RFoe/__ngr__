@@ -6,10 +6,10 @@
 
 namespace __ngr::inline __v0::__core {
 struct __memory_mapped_region {
-    void       *__ptr_;
+    void       *__data_;
     std::size_t __size_;
 
-    __memory_mapped_region() noexcept : __ptr_(nullptr), __size_(0) {}
+    __memory_mapped_region() noexcept : __data_(nullptr), __size_(0) {}
     __memory_mapped_region(void *__ptr, std::size_t __size) noexcept;
     ~__memory_mapped_region() noexcept;
 
@@ -27,31 +27,31 @@ struct __memory_mapped_region {
 };
 inline __memory_mapped_region::__memory_mapped_region(
     void *__ptr, std::size_t __size) noexcept
-    : __ptr_(__ptr), __size_(__size) {
-    if (__ptr_ == MAP_FAILED) { __ptr_ = nullptr; }
+    : __data_(__ptr), __size_(__size) {
+    if (__data_ == MAP_FAILED) { __data_ = nullptr; }
 }
 
 inline __memory_mapped_region::~__memory_mapped_region() noexcept {
-    if (__ptr_ != nullptr) { ::munmap(__ptr_, __size_); }
+    if (__data_ != nullptr) { ::munmap(__data_, __size_); }
 }
 
 inline __memory_mapped_region::__memory_mapped_region(
     __memory_mapped_region &&__other) noexcept
-    : __ptr_(std::exchange(__other.__ptr_, nullptr)),
+    : __data_(std::exchange(__other.__data_, nullptr)),
       __size_(std::exchange(__other.__size_, 0)) {}
 
 inline auto
 __memory_mapped_region::operator=(__memory_mapped_region &&__other) noexcept
     -> __memory_mapped_region & {
     if (this != &__other) {
-        if (__ptr_ != nullptr) { ::munmap(__ptr_, __size_); }
-        __ptr_  = std::exchange(__other.__ptr_, nullptr);
+        if (__data_ != nullptr) { ::munmap(__data_, __size_); }
+        __data_ = std::exchange(__other.__data_, nullptr);
         __size_ = std::exchange(__other.__size_, 0);
     }
     return *this;
 }
 
 inline __memory_mapped_region::operator bool() const noexcept {
-    return __ptr_ != nullptr;
+    return __data_ != nullptr;
 }
 } // namespace __ngr::inline __v0::__core

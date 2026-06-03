@@ -7,7 +7,7 @@
     #endif
 namespace __ngr::inline __v0::__core {
 [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
-inline void _S_spin_loop_pause() noexcept {
+inline void __spin_loop_pause() noexcept {
     #if defined(_MSC_VER) || (defined(__EDG__) && defined(__INTELLISENSE__))
     _mm_pause();
     #else
@@ -18,7 +18,7 @@ inline void _S_spin_loop_pause() noexcept {
 #elif defined(__arm__) || defined(__aarch64__) || defined(_M_ARM64)
 namespace __ngr::inline __v0::__core {
 [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
-inline void _S_spin_loop_pause() noexcept {
+inline void __spin_loop_pause() noexcept {
     #if (                                                                      \
         defined(__ARM_ARCH_6K__) || defined(__ARM_ARCH_6Z__) ||                \
         defined(__ARM_ARCH_6ZK__) || defined(__ARM_ARCH_6T2__) ||              \
@@ -37,6 +37,6 @@ inline void _S_spin_loop_pause() noexcept {
 #else
 namespace __ngr::inline __v0::__core {
 [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
-inline void _S_spin_loop_pause() noexcept {}
+inline void __spin_loop_pause() noexcept {}
 } // namespace __ngr::inline __v0::__core
 #endif

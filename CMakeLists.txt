@@ -14,6 +14,9 @@ endif ()
 
 project (ngr VERSION 0.1.0 LANGUAGES CXX C DESCRIPTION ${PROJECT_DESCRIPTION})
 
+find_package (PkgConfig REQUIRED)
+pkg_check_modules (URING REQUIRED IMPORTED_TARGET liburing)
+
 enable_testing ()
 
 set (CMAKE_CXX_STANDARD 26)
@@ -84,6 +87,7 @@ target_compile_options (
             -march=native>
             -stdlib=libc++
 )
+target_link_libraries (${PROJECT_NAME} PRIVATE PkgConfig::URING)
 target_link_options (${PROJECT_NAME} PRIVATE -stdlib=libc++ -lc++ -lc++abi)
 
 if (__TEST_SOURCES__)
@@ -116,6 +120,7 @@ if (__TEST_SOURCES__)
                 -march=native>
                 -stdlib=libc++
     )
+    target_link_libraries (test_${PROJECT_NAME} PRIVATE PkgConfig::URING)
     target_link_options (
         test_${PROJECT_NAME} PRIVATE -stdlib=libc++ -lc++ -lc++abi
     )
@@ -152,6 +157,7 @@ if (__BENCHMARK_SOURCES__)
                 -march=native>
                 -stdlib=libc++
     )
+    target_link_libraries (benchmark_${PROJECT_NAME} PRIVATE PkgConfig::URING)
     target_link_options (
         benchmark_${PROJECT_NAME} PRIVATE -stdlib=libc++ -lc++ -lc++abi
     )

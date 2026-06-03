@@ -4,7 +4,7 @@
 namespace __ngr::inline __v0::__core {
 
 template <typename _Par, typename _Mem>
-constexpr auto _S_compa_abi_offset(const _Mem _Par::*__mem_ptr) noexcept
+constexpr auto __compa_abi_offset(const _Mem _Par::*__mem_ptr) noexcept
     -> __PTRDIFF_TYPE__ {
 #if defined(_MSC_VER)
     union {
@@ -38,22 +38,22 @@ constexpr auto _S_compa_abi_offset(const _Mem _Par::*__mem_ptr) noexcept
 template <typename _Par, typename _Mem>
 [[__gnu__::__always_inline__, __gnu__::__artificial__, __nodiscard__]] //
 inline constexpr auto
-_S_base_offset(_Mem *__mp, const _Mem _Par::*__mem_ptr) noexcept -> _Par * {
+__base_offset(_Mem *__mp, const _Mem _Par::*__mem_ptr) noexcept -> _Par * {
     return __builtin_launder(
         reinterpret_cast<_Par *>(
             reinterpret_cast<unsigned long long>(__mp) -
-            static_cast<unsigned long long>(_S_compa_abi_offset(__mem_ptr))));
+            static_cast<unsigned long long>(__compa_abi_offset(__mem_ptr))));
 }
 
 template <typename _Par, typename _Mem>
 [[__gnu__::__always_inline__, __gnu__::__artificial__, __nodiscard__]] //
 inline constexpr auto
-_S_base_offset(const _Mem *__mp, const _Mem _Par::*__mem_ptr) noexcept
+__base_offset(const _Mem *__mp, const _Mem _Par::*__mem_ptr) noexcept
     -> const _Par * {
     return __builtin_launder(
         reinterpret_cast<const _Par *>(
             reinterpret_cast<unsigned long long>(__mp) -
-            static_cast<unsigned long long>(_S_compa_abi_offset(__mem_ptr))));
+            static_cast<unsigned long long>(__compa_abi_offset(__mem_ptr))));
 }
 
 } // namespace __ngr::inline __v0::__core

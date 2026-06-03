@@ -62,7 +62,7 @@ struct __allocator {
     }
 
     auto _M_push_stack_frame(std::size_t __sz) noexcept -> void * {
-        std::size_t __n = _S_round_up(
+        std::size_t __n = __round_up(
             sizeof(__frame_prefix) + __sz, __STDCPP_DEFAULT_NEW_ALIGNMENT__);
         if (__cur_chunk_ == nullptr) {
             __chunk_prefix *__chunk = _M_allocate_chunk(__n);

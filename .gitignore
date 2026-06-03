@@ -1,3 +1,7 @@
 build
 .vscode
 .claude
+build-test
+build-tsan
+.claude 
+__io_uring__.txt

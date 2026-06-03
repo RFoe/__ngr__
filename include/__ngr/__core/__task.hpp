@@ -104,46 +104,47 @@ template <> struct __promise_storage<void> {
     }
 };
 
-struct __promise_alloc {
+struct __promise_new_delete {
     [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
-    inline static auto _S_alloc_address(void *__fr, std::size_t __n) noexcept
+    inline static auto __alloc_address(void *__fr, std::size_t __n) noexcept
         -> __allocator ** {
         char *__r = static_cast<char *>(__fr) + __n;        // NOLINT
         return reinterpret_cast<__allocator **>(
-            _S_round_up(__r, alignof(__allocator *)));
+            __round_up(__r, alignof(__allocator *)));
     }
 
     [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
-    inline static auto _S_alloc_size(std::size_t __n) noexcept -> std::size_t {
-        return _S_round_up(__n, alignof(__allocator *)) + sizeof(__allocator *);
+    inline static auto __allocate_size(std::size_t __n) noexcept
+        -> std::size_t {
+        return __round_up(__n, alignof(__allocator *)) + sizeof(__allocator *);
     }
 
     [[using __gnu__: __returns_nonnull__, __alloc_size__(1)]]
     auto operator new(const std::size_t __n) noexcept -> void * {
-        const bool   __top_fr_alloc = (__allocator::__local_ == nullptr);
-        __allocator *__al __attribute__((__uninitialized__)); // NOLINT
-        if (__top_fr_alloc) [[__unlikely__]] {
-            __al                  = ::new (std::nothrow) __allocator{};
-            __allocator::__local_ = __al;
+        const bool   __top_frame = (__tl_allocator == nullptr);
+        __allocator *__pa __attribute__((__uninitialized__)); // NOLINT
+        if (__top_frame) [[__unlikely__]] {
+            __pa           = ::new (std::nothrow) __allocator{};
+            __tl_allocator = __pa;
         } else {
-            __al = __allocator::__local_;
+            __pa = __tl_allocator;
         }
 
-        void *__r = __al->_M_push_stack_frame(_S_alloc_size(__n));
-        *_S_alloc_address(__r, __n) = __top_fr_alloc ? __al : nullptr;
+        void *__r = __pa->_M_push_stack_frame(__allocate_size(__n));
+        *__alloc_address(__r, __n) = __top_frame ? __pa : nullptr;
         return __r;
     }
 
     [[__gnu__::__nonnull__]]
     void operator delete(void *__ptr, std::size_t __n) noexcept {
-        __allocator *__alloc = *_S_alloc_address(__ptr, __n);
+        __allocator *__alloc = *__alloc_address(__ptr, __n);
         if (__alloc != nullptr) [[__unlikely__]] {
             __alloc->_M_pop_stack_frame(__ptr);
-            __allocator::__local_ = nullptr;
+            __tl_allocator = nullptr;
             __alloc->~__allocator();
             ::operator delete(__alloc, std::nothrow);
         } else {
-            __allocator::__local_->_M_pop_stack_frame(__ptr);
+            __tl_allocator->_M_pop_stack_frame(__ptr);
         }
     }
 };
@@ -193,8 +194,8 @@ struct [[__nodiscard__]] __task {
 
     struct __promise final
         : public __promise_storage<_Ty>
-        , public __promise_alloc
-        , public __promise_saved_fr_alloc_wrapper
+        , public __promise_new_delete
+        , public __promise_saved_tl_alloc
         , public __promise_base {
         void unhandled_exception() noexcept {
             __promise_storage<_Ty>::_M_set_exception(std::current_exception());

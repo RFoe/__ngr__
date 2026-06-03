@@ -16,20 +16,6 @@ template <typename _Tp, _Tp *_Tp::*_Next> struct alignas(__GCC_DESTRUCTIVE_SIZE)
         return __head_.load(std::memory_order_relaxed) == nullptr;
     }
 
-    struct __try_push_result {
-        bool __success_;
-        bool __was_empty_;
-    };
-
-    auto _M_try_push_front(__pointer __p) noexcept -> __try_push_result {
-        __pointer __old_head = __head_.load(std::memory_order_relaxed);
-        __p->*_Next          = __old_head;
-        return {
-            __head_.compare_exchange_strong(
-                __old_head, __p, std::memory_order_acq_rel),
-            __old_head == nullptr};
-    }
-
     auto _M_push_front(__pointer __p) noexcept -> bool {
         __pointer __old_head = __head_.load(std::memory_order_relaxed);
         do {
@@ -52,14 +38,14 @@ template <typename _Tp, _Tp *_Tp::*_Next> struct alignas(__GCC_DESTRUCTIVE_SIZE)
     }
 
     auto _M_pop_swap() noexcept -> __intrusive_queue<_Next> {
-        return __intrusive_queue<_Next>::_M_create(_M_release());
+        return __intrusive_queue<_Next>::_M_create(_M_reset());
     }
 
     auto _M_pop_swap_reversed() noexcept -> __intrusive_queue<_Next> {
-        return __intrusive_queue<_Next>::_M_create_reversed(_M_release());
+        return __intrusive_queue<_Next>::_M_create_reversed(_M_reset());
     }
 
-    auto _M_release() noexcept -> __pointer {
+    auto _M_reset() noexcept -> __pointer {
         __pointer __old_head = __head_.load(std::memory_order_relaxed);
         while (!__head_.compare_exchange_weak(
             __old_head, nullptr, std::memory_order_acq_rel)) {

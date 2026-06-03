@@ -3,7 +3,7 @@ io_uring的一些优化
 IORING_FEAT_SINGLE_MMAP
 SQ + CQ
 
-IORING_OP_ASYNC_CANCEL
+IORING_OP_ASYNC_CANCEL IORING_OP_TIMEOUT_REMOVE 
 zombie I/O event(CQE after socket closed)
 
 eventfd vs pipe

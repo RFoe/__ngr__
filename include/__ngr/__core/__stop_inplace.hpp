@@ -19,7 +19,7 @@ struct __pause_or_yield {
 
     constexpr __pause_or_yield() noexcept = default;
     [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
-    inline static void _S_spin_loop_pause() noexcept {
+    inline static void __spin_loop_pause() noexcept {
 #if defined(_MSC_VER) && (defined(_M_IX86) || defined(_M_X64))
         ::_mm_pause();
 #elif defined(__i386__) || defined(__x86_64__) || defined(_M_X64)
@@ -34,7 +34,7 @@ struct __pause_or_yield {
     [[__gnu__::__always_inline__, __gnu__::__artificial__]]
     inline void _M_try() noexcept {
         if (__count_++ < __yield_threshold_) {
-            _S_spin_loop_pause();
+            __spin_loop_pause();
         } else {
             if (__count_ == 0) { // wrapped around
                 __count_ = __yield_threshold_;
@@ -142,7 +142,7 @@ template <typename _Fn> struct __stop_callback : public __stop_cb_base {
         requires std::is_constructible_v<_Fn, _Fn2>
     explicit __stop_callback(__stop_token __tok, _Fn2 &&__fn)
         noexcept(std::is_nothrow_constructible_v<_Fn, _Fn2>)
-        : __stop_cb_base(__tok.__source_, &__stop_callback::_S_execute_impl),
+        : __stop_cb_base(__tok.__source_, &__stop_callback::__manage),
           __func_(std::forward<_Fn2>(__fn)) {
         _M_register_callback();
     }
@@ -156,7 +156,7 @@ template <typename _Fn> struct __stop_callback : public __stop_cb_base {
     __stop_callback(__stop_callback &&)                     = delete;
     auto operator=(__stop_callback &&) -> __stop_callback & = delete;
 
-    static void _S_execute_impl(__stop_cb_base *__cb) noexcept {
+    static void __manage(__stop_cb_base *__cb) noexcept {
         std::move(static_cast<__stop_callback *>(__cb)->__func_)();
     }
 
