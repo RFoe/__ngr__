@@ -20,29 +20,29 @@ template <typename _Tp, _Tp *_Tp::*_Next> struct alignas(__GCC_DESTRUCTIVE_SIZE)
         __pointer __old_head = __head_.load(std::memory_order_relaxed);
         do {
             __p->*_Next = __old_head;
-        } while (!__head_.compare_exchange_weak(
-            __old_head, __p, std::memory_order_acq_rel));
+        } while (
+            !__head_.compare_exchange_weak(__old_head, __p, std::memory_order_acq_rel));
         return __old_head == nullptr;
     }
 
     void _M_prepend(__intrusive_queue<_Next> __queue) noexcept {
-        __pointer __new_head = __queue.front();
-        __pointer __tail     = __queue.back();
+        __pointer __new_head = __queue._M_front();
+        __pointer __tail     = __queue._M_back();
         __pointer __old_head = __head_.load(std::memory_order_relaxed);
         __tail->*_Next       = __old_head;
         while (!__head_.compare_exchange_weak(
             __old_head, __new_head, std::memory_order_acq_rel)) {
             __tail->*_Next = __old_head;
         }
-        __queue.clear();
+        __queue._M_clear();
     }
 
     auto _M_pop_swap() noexcept -> __intrusive_queue<_Next> {
-        return __intrusive_queue<_Next>::_M_create(_M_reset());
+        return __intrusive_queue<_Next>::__create(_M_reset());
     }
 
     auto _M_pop_swap_reversed() noexcept -> __intrusive_queue<_Next> {
-        return __intrusive_queue<_Next>::_M_create_reversed(_M_reset());
+        return __intrusive_queue<_Next>::__create_reversed(_M_reset());
     }
 
     auto _M_reset() noexcept -> __pointer {

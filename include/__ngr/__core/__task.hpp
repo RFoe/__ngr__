@@ -1,6 +1,5 @@
 #pragma once
 
-#include <__coroutine/coroutine_handle.h>
 #include <__coroutine/coroutine_traits.h>
 #include <__coroutine/noop_coroutine_handle.h>
 #include <__coroutine/trivial_awaitables.h>
@@ -17,6 +16,7 @@
 
 // NOLINTBEGIN(*-special-member-functions)
 // NOLINTBEGIN(cert-dcl54-cpp, *-new-delete-overloads, *-new-delete-operators)
+// NOLINTBEGIN(performance-unnecessary-value-param)
 namespace __ngr::inline __v0::__core {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wmismatched-new-delete"
@@ -121,13 +121,13 @@ struct __promise_new_delete {
 
     [[using __gnu__: __returns_nonnull__, __alloc_size__(1)]]
     auto operator new(const std::size_t __n) noexcept -> void * {
-        const bool   __top_frame = (__tl_allocator == nullptr);
+        const bool   __top_frame = (__k_tls_alloc == nullptr);
         __allocator *__pa __attribute__((__uninitialized__)); // NOLINT
         if (__top_frame) [[__unlikely__]] {
-            __pa           = ::new (std::nothrow) __allocator{};
-            __tl_allocator = __pa;
+            __pa          = ::new (std::nothrow) __allocator{};
+            __k_tls_alloc = __pa;
         } else {
-            __pa = __tl_allocator;
+            __pa = __k_tls_alloc;
         }
 
         void *__r = __pa->_M_push_stack_frame(__allocate_size(__n));
@@ -140,11 +140,11 @@ struct __promise_new_delete {
         __allocator *__alloc = *__alloc_address(__ptr, __n);
         if (__alloc != nullptr) [[__unlikely__]] {
             __alloc->_M_pop_stack_frame(__ptr);
-            __tl_allocator = nullptr;
+            __k_tls_alloc = nullptr;
             __alloc->~__allocator();
             ::operator delete(__alloc, std::nothrow);
         } else {
-            __tl_allocator->_M_pop_stack_frame(__ptr);
+            __k_tls_alloc->_M_pop_stack_frame(__ptr);
         }
     }
 };
@@ -195,7 +195,6 @@ struct [[__nodiscard__]] __task {
     struct __promise final
         : public __promise_storage<_Ty>
         , public __promise_new_delete
-        , public __promise_saved_tl_alloc
         , public __promise_base {
         void unhandled_exception() noexcept {
             __promise_storage<_Ty>::_M_set_exception(std::current_exception());
@@ -207,5 +206,6 @@ struct [[__nodiscard__]] __task {
 };
 #pragma clang diagnostic pop
 } // namespace __ngr::inline __v0::__core
+// NOLINTEND(performance-unnecessary-value-param)
 // NOLINTEND(cert-dcl54-cpp, *-new-delete-overloads, *-new-delete-operators)
 // NOLINTEND(*-special-member-functions)

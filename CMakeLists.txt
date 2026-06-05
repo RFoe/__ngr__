@@ -28,6 +28,9 @@ execute_process (
 )
 set (CMAKE_BUILD_PARALLEL_LEVEL ${NPROC})
 
+execute_process(COMMAND getconf PAGESIZE OUTPUT_VARIABLE __PAGE_SIZE__ OUTPUT_STRIP_TRAILING_WHITESPACE)
+add_compile_definitions(__LIBNGR_PAGE_BYTES=${__PAGE_SIZE__})
+
 find_program (CCACHE_FOUND ccache)
 if (CCACHE_FOUND)
     set (CMAKE_CXX_COMPILER_LAUNCHER ${CCACHE_FOUND})

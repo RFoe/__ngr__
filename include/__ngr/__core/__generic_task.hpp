@@ -7,19 +7,17 @@
 
 namespace __ngr::inline __v0::__core {
 struct __allocator;
-struct __promise_saved_tl_alloc {
-    __allocator *__tl_alloc_ = nullptr;
-};
-inline thread_local __allocator *__tl_allocator = nullptr;
+inline thread_local __allocator *__k_tls_alloc = nullptr; // NOLINT
 
 struct __generic_task {
     inline static thread_local void *__arg_                         = nullptr;
     inline static thread_local void (*__callback_)(void *) noexcept = nullptr;
     __extension__ union {
-        std::coroutine_handle<__promise_saved_tl_alloc> __resume_ = nullptr;
-        __generic_task                                 *__target_;
+        std::coroutine_handle<void> __resume_ = nullptr;
+        __generic_task             *__target_;
     };
-    __generic_task *__next_ = nullptr;
+    mutable __allocator *__prev_alloc_ = nullptr;
+    __generic_task      *__next_       = nullptr;
 
     [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
     inline static void
@@ -28,11 +26,10 @@ struct __generic_task {
         __callback_ = __fn;
     }
     [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
-    inline void _M_execute() const noexcept {
-        __resume_.promise().__tl_alloc_ =
-            std::exchange(__tl_allocator, nullptr);
+    inline void _M_do_execute() const noexcept {
+        __prev_alloc_ = std::exchange(__k_tls_alloc, nullptr);
         __coro_resume(__resume_);
-        __tl_allocator = __resume_.promise().__tl_alloc_;
+        __k_tls_alloc = std::exchange(__prev_alloc_, nullptr);
         if (__callback_ != nullptr) [[__likely__]] {
             std::exchange(__callback_, nullptr)(__arg_);
         }

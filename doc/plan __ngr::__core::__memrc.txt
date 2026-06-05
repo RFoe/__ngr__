@@ -1,0 +1,13 @@
+_Memchunk_descriptor: alignas(64)
+    __PTRDIFF_TYPE__        __use_count_;
+    _Memchunk_descriptor*   __next_;
+    48 bytes padding
+_Huge_block
+    ::mmap -> (4096 + _Memchunk_descriptor) * 64 -> 4096 * 65
+
+_Src
+  vec [_Huge_block]  monotonic | growable
+  
+
+
+

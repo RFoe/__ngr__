@@ -65,7 +65,7 @@ AlwaysBreakTemplateDeclarations: No
 # BreakConstructorInitializers: BeforeComma
 BreakInheritanceList: BeforeComma
 # BreakStringLiterals: true
-# ColumnLimit: 90
+ColumnLimit: 90
 # CompactNamespaces: true
 # ConstructorInitializerIndentWidth: 2
 # ContinuationIndentWidth: 2
