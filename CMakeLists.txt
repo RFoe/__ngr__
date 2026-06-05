@@ -5,7 +5,7 @@ set (PROJECT_DESCRIPTION "ngr" CACHE STRING "project description")
 set_property (GLOBAL PROPERTY USE_FOLDERS ON)
 
 set (CMAKE_BUILD_TYPE Debug CACHE STRING "build type" FORCE)
-set (__SANTINIZER__ "-fsanitize=undefined")
+set (__SANTINIZER__ "-fsanitize=thread")
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     set (CMAKE_EXE_LINKER_FLAGS_DEBUG
          "${CMAKE_EXE_LINKER_FLAGS_DEBUG} ${__SANTINIZER__}"
@@ -28,8 +28,11 @@ execute_process (
 )
 set (CMAKE_BUILD_PARALLEL_LEVEL ${NPROC})
 
-execute_process(COMMAND getconf PAGESIZE OUTPUT_VARIABLE __PAGE_SIZE__ OUTPUT_STRIP_TRAILING_WHITESPACE)
-add_compile_definitions(__LIBNGR_PAGE_BYTES=${__PAGE_SIZE__})
+execute_process (
+    COMMAND getconf PAGESIZE OUTPUT_VARIABLE __PAGE_SIZE__
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+add_compile_definitions (__LIBNGR_PAGE_BYTES=${__PAGE_SIZE__})
 
 find_program (CCACHE_FOUND ccache)
 if (CCACHE_FOUND)

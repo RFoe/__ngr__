@@ -1,4 +1,4 @@
-#include <__ngr/__core/__buffer.hpp>
+#include <__ngr/__core/__memory_resource.hpp>
 
 #include <atomic>
 #include <cassert>
