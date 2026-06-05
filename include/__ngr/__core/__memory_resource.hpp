@@ -154,11 +154,16 @@ struct __remote_source {
                 __n, __T_, std::memory_order_acq_rel, std::memory_order_acquire)) {
                 if (__n == __T_) [[__unlikely__]] {
                     __spin_loop_pause();
-                    continue;
+                    __n = __q.__n_.load(std::memory_order_acquire);
                 }
             }
-            using __iterator    = __intrusive_queue<&__block::__next_>::__iterator;
-            __u32    __r        = __T_ - __n;
+            // After the CAS above, `__n` is the value we replaced.
+            // If another thread concurrently filled this slot to __T_, the CAS
+            // may have no-op succeeded with __n == __T_, meaning __r == 0.
+            // Re-read state and pick a different slot in that case.
+            using __iterator = __intrusive_queue<&__block::__next_>::__iterator;
+            __u32 __r        = __T_ - __n;
+            if (__r == 0) [[__unlikely__]] { continue; }
             __block *__sentinel = (__k + __r < __M_) ? __ptr[__k + __r] : nullptr;
             __intrusive_queue<&__block::__next_> __tmp;
             __tmp._M_splice(
