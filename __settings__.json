@@ -1,0 +1,58 @@
+    "[One Dark Pro Night Flat]": {
+      "rules": {
+        // bold declaration
+        "type": {
+          "bold": true
+        },
+        "class": {
+          "bold": true
+        },
+        "function": {
+          "bold": true
+        },
+        "method": {
+          "bold": true
+        },
+        // a dedicated color for macro
+        "macro": "#BEB7FF",
+        // a dedicated color for global variables
+        "variable.globalScope": {
+          "bold": true,
+          "foreground": "#C8C8C8",
+        },
+        // italic parameters
+        "parameter": {
+          "italic": true
+        },
+        "typeParameter": {
+          "italic": true
+        },
+        "property": {
+          "foreground": "#F07178",
+          "fontStyle": "italic",
+        },
+        "property.declaration": {
+          "foreground": "#F07178",
+          "fontStyle": "italic"
+        },
+        "variable.other.property": {
+          "foreground": "#F07178",
+          "fontStyle": "italic"
+        },
+        // color non-type template paramter as variable
+        "typeParameter.readonly": {
+          "foreground": "#9CDCFE",
+        },
+        // color deduced 'auto' consistently
+        "*.deduced": "#569CD6",
+        // color variable 
+        // don't color differconsistentlyently on readonly modifier because of a clangd bug (maybe a feature)
+        "variable.readonly.globalScope": "#C8C8C8",
+        "variable.readonly.fileScope": "#C8C8C8",
+        "property.readonly.classScope": "#9CDCFE",
+        "variable.readonly.classScope": "#C8C8C8",
+        "parameter.readonly.functionScope": "#9CDCFE",
+        "variable.readonly.functionScope": "#9CDCFE",
+        "variable.readonly.localScope": "#9CDCFE",
+      }
+    }
