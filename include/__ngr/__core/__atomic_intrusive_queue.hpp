@@ -5,9 +5,7 @@
 
 namespace __ngr::inline __v0::__core {
 template <auto _Next> struct __atomic_intrusive_queue;
-
-template <typename _Tp, _Tp *_Tp::*_Next> struct alignas(__GCC_DESTRUCTIVE_SIZE)
-    __atomic_intrusive_queue<_Next> {
+template <typename _Tp, _Tp *_Tp::*_Next> struct __atomic_intrusive_queue<_Next> {
     using __pointer        = _Tp *;
     using __atomic_pointer = std::atomic<_Tp *>;
 
@@ -56,4 +54,5 @@ template <typename _Tp, _Tp *_Tp::*_Next> struct alignas(__GCC_DESTRUCTIVE_SIZE)
 
     __atomic_pointer __head_{nullptr};
 };
+
 } // namespace __ngr::inline __v0::__core

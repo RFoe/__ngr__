@@ -73,18 +73,16 @@ struct __stop_source {
 
     [[__nodiscard__]]
     auto _M_stop_requested() const noexcept -> bool {
-        return (__state_.load(std::memory_order_acquire) &
-                __stop_requested_flag_) != 0;
+        return (__state_.load(std::memory_order_acquire) & __stop_requested_flag_) != 0;
     }
 
     auto _M_lock() const noexcept -> std::uint8_t;
     [[__gnu__::__always_inline__, __gnu__::__artificial__]]
     inline void _M_unlock(std::uint8_t __prev) const noexcept;
     [[__nodiscard__]] auto
-    _M_try_lock_unless_stop_requested(bool __set_stop_requested) const noexcept
+    _M_try_lock_unless_stop_requested(bool __set_stop_requested) const noexcept -> bool;
+    [[__nodiscard__]] auto _M_try_push_front_callback(__stop_cb_base *) const noexcept
         -> bool;
-    [[__nodiscard__]] auto
-         _M_try_push_front_callback(__stop_cb_base *) const noexcept -> bool;
     void _M_remove_callback(__stop_cb_base *) const noexcept;
 
     static constexpr std::uint8_t __none_flag_           = 0;
@@ -102,11 +100,9 @@ struct __stop_token {
     constexpr __stop_token(__stop_token &&__other) noexcept
         : __source_(std::exchange(__other.__source_, {})) {}
 
-    constexpr auto operator=(__stop_token const &) noexcept
-        -> __stop_token & = default;
+    constexpr auto operator=(__stop_token const &) noexcept -> __stop_token & = default;
 
-    constexpr auto operator=(__stop_token &&__other) noexcept
-        -> __stop_token & {
+    constexpr auto operator=(__stop_token &&__other) noexcept -> __stop_token & {
         __source_ = std::exchange(__other.__source_, nullptr);
         return *this;
     }
@@ -124,8 +120,7 @@ struct __stop_token {
         std::swap(__source_, __other.__source_);
     }
 
-    constexpr auto operator==(__stop_token const &) const noexcept
-        -> bool = default;
+    constexpr auto operator==(__stop_token const &) const noexcept -> bool = default;
 
     constexpr explicit __stop_token(__stop_source const *__src) noexcept
         : __source_(__src) {}
@@ -133,24 +128,21 @@ struct __stop_token {
     __stop_source const *__source_;
 };
 
-inline constexpr auto __stop_source::_M_get_stop_token() const noexcept
-    -> __stop_token {
+inline constexpr auto __stop_source::_M_get_stop_token() const noexcept -> __stop_token {
     return __stop_token{this};
 }
 template <typename _Fn> struct __stop_callback : public __stop_cb_base {
-    template <typename _Fn2>
-        requires std::is_constructible_v<_Fn, _Fn2>
-    explicit __stop_callback(__stop_token __tok, _Fn2 &&__fn)
-        noexcept(std::is_nothrow_constructible_v<_Fn, _Fn2>)
+    template <typename... _Args>
+        requires std::is_constructible_v<_Fn, _Args...>
+    explicit __stop_callback(__stop_token __tok, _Args &&...__args)
+        noexcept(std::is_nothrow_constructible_v<_Fn, _Args...>)
         : __stop_cb_base(__tok.__source_, &__stop_callback::__manage),
-          __func_(std::forward<_Fn2>(__fn)) {
+          __func_(std::forward<_Args>(__args)...) {
         _M_register_callback();
     }
 
     ~__stop_callback() noexcept {
-        if (__source_ != nullptr) [[__likely__]] {
-            __source_->_M_remove_callback(this);
-        }
+        if (__source_ != nullptr) [[__likely__]] { __source_->_M_remove_callback(this); }
     }
 
     __stop_callback(__stop_callback &&)                     = delete;
@@ -163,8 +155,7 @@ template <typename _Fn> struct __stop_callback : public __stop_cb_base {
     [[__no_unique_address__]] _Fn __func_;
 };
 
-template <typename _Fn> __stop_callback(__stop_token, _Fn)
-    -> __stop_callback<_Fn>;
+template <typename _Fn> __stop_callback(__stop_token, _Fn) -> __stop_callback<_Fn>;
 
 inline __stop_source::~__stop_source() noexcept {
     assert((__state_.load(std::memory_order_relaxed) & __locked_flag_) == 0);
@@ -208,13 +199,13 @@ inline void __stop_source::_M_unlock(std::uint8_t __prev) const noexcept {
     __state_.store(__prev, std::memory_order_release);
 }
 
-inline auto __stop_source::_M_try_lock_unless_stop_requested(
-    bool __set_stop_requested) const noexcept -> bool {
+inline auto
+__stop_source::_M_try_lock_unless_stop_requested(bool __set_stop_requested) const noexcept
+    -> bool {
     __pause_or_yield   __loop;
     std::uint8_t       __prev = __state_.load(std::memory_order_relaxed);
-    const std::uint8_t __next = __set_stop_requested
-                                  ? (__locked_flag_ | __stop_requested_flag_)
-                                  : __locked_flag_;
+    const std::uint8_t __next =
+        __set_stop_requested ? (__locked_flag_ | __stop_requested_flag_) : __locked_flag_;
     do {
         while (true) {
             if ((__prev & __stop_requested_flag_) != 0) { return false; }
@@ -228,8 +219,7 @@ inline auto __stop_source::_M_try_lock_unless_stop_requested(
     return true;
 }
 
-inline auto
-__stop_source::_M_try_push_front_callback(__stop_cb_base *__cb) const noexcept
+inline auto __stop_source::_M_try_push_front_callback(__stop_cb_base *__cb) const noexcept
     -> bool {
     if (!_M_try_lock_unless_stop_requested(false)) { return false; }
 
@@ -242,23 +232,19 @@ __stop_source::_M_try_push_front_callback(__stop_cb_base *__cb) const noexcept
     return true;
 }
 
-inline void
-__stop_source::_M_remove_callback(__stop_cb_base *__cb) const noexcept {
+inline void __stop_source::_M_remove_callback(__stop_cb_base *__cb) const noexcept {
     const std::uint8_t __prev = _M_lock();
 
     if (__cb->__prev_ != nullptr) [[__likely__]] {
         *__cb->__prev_ = __cb->__next_;
-        if (__cb->__next_ != nullptr) {
-            __cb->__next_->__prev_ = __cb->__prev_;
-        }
+        if (__cb->__next_ != nullptr) { __cb->__next_->__prev_ = __cb->__prev_; }
         _M_unlock(__prev);
     } else {
         const bool __notify = this->__notify_;
         _M_unlock(__prev);
         if (__notify) [[__unlikely__]] {
             __pause_or_yield __loop;
-            while (
-                !__cb->__callback_completed_.load(std::memory_order_acquire)) {
+            while (!__cb->__callback_completed_.load(std::memory_order_acquire)) {
                 __loop._M_try();
             }
         }
@@ -279,8 +265,7 @@ template <typename _Src = __stop_source> struct __forward_stop_request {
     void  operator()() const noexcept { __stop_source_._M_request_stop(); }
 };
 
-template <typename _Src> __forward_stop_request(_Src &)
-    -> __forward_stop_request<_Src>;
+template <typename _Src> __forward_stop_request(_Src &) -> __forward_stop_request<_Src>;
 
 } // namespace __ngr::inline __v0::__core
 // NOLINTEND(*-special-member-functions, hicpp-no-assembler)

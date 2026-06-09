@@ -1,229 +1,180 @@
-   #include <__ngr/__core/__awaitable.hpp>
-#include <__ngr/__core/__generic_task_base.hpp>
-#include <__ngr/__core/__intrusive_queue.hpp>
+#include <__ngr/__core/__circular_buffer.hpp>
+#include <__ngr/__core/__memory_resource.hpp>
+#include <__ngr/__core/__scheduler.hpp>
+#include <__ngr/__core/__spawn.hpp>
+#include <__ngr/__core/__task.hpp>
+
+#include <arpa/inet.h>
 #include <print>
-#include <variant>
-#include <vector>
+#include <sys/socket.h>
+
+#include <__algorithm/min.h>
+#include <__vector/vector.h>
 
 using namespace __ngr::__core; // NOLINT
 
 namespace {
 
-auto __plus(const int __a, const int __b) noexcept -> __awaitable<int> {
-    std::println("__plus(): co_return __a + __b");
-    co_return __a + __b;
+__scheduler __k_schd{1024, 0};
+int         __k_accept = -1;
+
+#define _LIBNGR_MAX_ACQ_ONCE 4U
+
+template <auto __m, typename _Ty = __remove_cvref(decltype(__m))>
+constexpr auto __div(_Ty __n) -> _Ty {
+    return (__n + __m - 1) / __m;
 }
 
-auto __println(const char *__msg) noexcept -> __awaitable<void> {
-    std::println("__println(): {}", __msg);
+template <typename _Ty> auto __async_spawn(_Ty) noexcept -> __spawn_task<_Ty> {
     co_return;
 }
-__intrusive_queue<&__generic_task_base::__next_> __pending_;
-struct __yield_awaiter : __generic_task_base {
-    __yield_awaiter() noexcept {
-        __execute_ = [](__generic_task_base *__base) noexcept -> void {
-            static_cast<__yield_awaiter *>(__base)->__resume_.resume();
-        };
-    }
-    std::coroutine_handle<> __resume_;
-    static auto             await_ready() noexcept -> bool { return false; }
-    auto await_suspend(std::coroutine_handle<void> __coro) noexcept
-        -> std::coroutine_handle<> {
-        __resume_ = __coro;
-        __pending_._M_push_back(this);
-        return std::noop_coroutine();
-    }
 
-    void await_resume() noexcept {}
-};
-struct __yield_until_stop_request_awaiter : __generic_task_base {
-    __yield_until_stop_request_awaiter() noexcept {
-        __execute_ = [](__generic_task_base *__base) noexcept -> void {
-            static_cast<__yield_until_stop_request_awaiter *>(__base)
-                ->__resume_.resume();
-        };
+struct __async_receive : public __ioring_task {
+    using __circular_block_buffer = __circular_buffer<__shared_block_subrange, 64>;
+    int                     __rfd_;
+    __u32                   __param_;
+    __circular_block_buffer __buf_;
+    ::iovec                 __iov_[8];
+    ::msghdr                __msghdr_;
+    __u32                   __M_  = 0;
+    __u32                   __nv_ = 0;
+    static void __submit(__ioring_task *__base, ::io_uring_sqe &__sqe) noexcept {
+        auto *__op = static_cast<__async_receive *>(__base);
+        __builtin_memset(&__sqe, 0, sizeof __sqe);
+        __sqe.opcode    = IORING_OP_RECVMSG;
+        __sqe.fd        = __op->__rfd_;
+        __sqe.addr      = __builtin_bit_cast(__u64, &__op->__msghdr_);
+        __sqe.len       = 1;
+        __sqe.msg_flags = MSG_WAITALL;
     }
-    std::coroutine_handle<> __resume_;
-    struct __resume_submit_callback {
-        __yield_until_stop_request_awaiter &__self_;
-        void                                operator()() const noexcept {
-            std::println(
-                "__yield_until_stop_request_awaiter::stop_request seen, {}",
-                __pending_._M_empty());
-            __pending_._M_push_back(&__self_);
-        }
-    };
-    using __suspend_resume_callback = __stop_callback<__resume_submit_callback>;
-    __extension__ union {
-        __suspend_resume_callback __callback_;
-    };
-    ~__yield_until_stop_request_awaiter() noexcept {}
-
-    static auto await_ready() noexcept -> bool { return false; }
-    template <typename _Self>
-    auto await_suspend(std::coroutine_handle<_Self> __coro) noexcept
-        -> std::coroutine_handle<> {
-        __resume_ = __coro;
-        ::new (&__callback_) __suspend_resume_callback(
-            __coro.promise().__source_._M_get_stop_token(), *this);
-        return std::noop_coroutine();
+    static void __complete(__ioring_task *__base, const ::io_uring_cqe &__cqe) noexcept {
+        auto *__op = static_cast<__async_receive *>(__base);
+        std::println("__cqe.res {}", __cqe.res);
+        __throw_error_code_if(__cqe.res < 0, -__cqe.res);
+        __op->__M_ += __cqe.res;
+        __op->_M_do_execute();
     }
+    struct __await_resume_result {
+        __circular_block_buffer::__monotonic_prefix_subrange __prefix_;
+        __shared_block_subrange                              __suffix_;
 
-    void await_resume() noexcept { __callback_.~__suspend_resume_callback(); }
-};
-auto __yield_until_stop_request() noexcept -> __awaitable<void> {
-    std::println(
-        "__yield_until_stop_request(): co_await "
-        "__yield_until_stop_request_awaiter{{}};");
-    co_await __yield_until_stop_request_awaiter{};
-    std::println("__yield_until_stop_request(): co_return;");
-    co_return;
-};
-
-auto __yield() noexcept -> __awaitable<void> {
-    std::println(
-        "__yield(): co_await "
-        "__yield_awaiter{{}};");
-    co_await __yield_awaiter{};
-    std::println("__yield(): co_return;");
-    co_return;
-};
-template <typename, typename... _Ts> struct __async_scope_awaiter;
-template <typename... _Ts, std::size_t... _Indices>
-struct __async_scope_awaiter<std::index_sequence<_Indices...>, _Ts...>
-    : __generic_task_base {
-    using __forward_stop_request = __stop_callback<__forward_stop_request<>>;
-    template <std::size_t _Index> struct __resume_task : __generic_task_base {
-        __async_scope_awaiter &__self_;
-        __extension__ union {
-            __forward_stop_request __fwd_;
-        };
-        __resume_task(__async_scope_awaiter &__self) noexcept
-            : __self_(__self) {
-            __execute_ = [](__generic_task_base *__base) noexcept -> void {
-                std::get<_Index>(
-                    static_cast<__resume_task *>(__base)->__self_.__awaitable_)
-                    .__coro_.resume();
-            };
-        }
-        ~__resume_task() noexcept {}
-    };
-    template <std::size_t _Index, typename _Ty> static auto
-    __submit_facade_coro(_Ty __coro, __async_scope_awaiter *__awaiter) noexcept
-        -> __awaitable<void> {
-        const int __cnt = ++__awaiter->__count_;
-        if (__cnt == 1) {
-            if constexpr (std::is_void_v<typename _Ty::value_type>) {
-                co_await std::move(__coro);
-                __awaiter->__result_.template emplace<_Index>();
-            } else {
-                __awaiter->__result_.template emplace<_Index>(
-                    co_await std::move(__coro));
+        void _M_print() && noexcept {
+            while (!__prefix_._M_empty()) {
+                auto &__tmp = __prefix_._M_front();
+                std::println("{}", std::string_view{__tmp._M_base(), __tmp.__len_});
+                __release(__tmp);
+                __prefix_._M_pop_front();
             }
-            std::println("co_await return");
-            if (__cnt != sizeof...(_Ts)) {
-                std::println("__awaiter->__source_._M_request_stop();");
-                __awaiter->__source_._M_request_stop();
+            if (__suffix_.__source_ != nullptr) {
+                std::println(
+                    "{}", std::string_view{__suffix_._M_base(), __suffix_.__len_});
+                __release(__suffix_);
             }
-        } else {
-            (void)(co_await std::move(__coro));
         }
-        if (__cnt == sizeof...(_Ts)) { __pending_._M_push_back(__awaiter); }
-        co_return;
-    }
-    __async_scope_awaiter(_Ts... __args) noexcept
-        : __result_(),
-          __awaitable_(
-              __submit_facade_coro<_Indices>(std::move(__args), this)...),
-          __submit_(((void)__args, *this)...) {
-        __execute_ = [](__generic_task_base *__base) noexcept -> void {
-            static_cast<__async_scope_awaiter *>(__base)->__resume_.resume();
-        };
-    }
-    ~__async_scope_awaiter() noexcept {
-        std::println("~__async_scope_awaiter()");
-    }
-    template <typename _Ty = void> struct __object_wrapper_impl {
-        using __t = _Ty;
-    };
-    template <> struct __object_wrapper_impl<void> {
-        struct __empty {};
-        using __t = __empty;
-    };
-    template <typename _Ty> using __void_task = __awaitable<void>;
-    template <typename _Ty> using __object_wrapper =
-        __object_wrapper_impl<_Ty>::__t;
-    std::variant<__object_wrapper<typename _Ts::value_type>...> __result_;
-    std::tuple<__void_task<_Ts>...>                             __awaitable_;
-    std::tuple<__resume_task<_Indices>...>                      __submit_;
-    std::coroutine_handle<> __resume_ = nullptr;
-    __stop_source           __source_;
-    int                     __count_ = 0;
-    __extension__ union {
-        __forward_stop_request __fwd_;
     };
 
-    static auto await_ready() noexcept -> bool { return false; }
-    template <typename _Self>
-    auto await_suspend(std::coroutine_handle<_Self> __coro) noexcept
-        -> std::coroutine_handle<> {
-        __resume_ = __coro;
-        auto __fn = [this]<std::size_t _Index>() noexcept -> void {
-            ::new (&std::get<_Index>(__submit_).__fwd_) __forward_stop_request{
-                __source_._M_get_stop_token(),
-                std::get<_Index>(__awaitable_).__coro_.promise().__source_};
-            __pending_._M_push_back(&std::get<_Index>(__submit_));
-        };
+    __async_receive(int __fd) noexcept
+        : __ioring_task(_nttp_<__submit>, _nttp_<__complete>), __rfd_(__fd) {}
 
-        ::new (&__fwd_) __forward_stop_request(
-            __coro.promise().__source_._M_get_stop_token(), __source_);
-        (__fn.template operator()<_Indices>(), ...);
-        return std::noop_coroutine();
+    static void __suspend(__async_receive *__op) noexcept {
+        std::println("__suspend __k_schd._M_submit(__op);");
+        __k_schd._M_submit(__op);
     }
+    auto await_ready() const noexcept -> bool {
+        std::println("__M_ >= __param_ {}", __M_ >= __param_);
+        return __M_ >= __param_;
+    }
+    auto await_suspend(std::coroutine_handle<> __coro) noexcept -> void {
+        __u32 __acq = __param_ - __M_;
+        __u32 __max = __div<_LIBNGR_MAX_ACQ_ONCE>(__acq);
+        __nv_       = 0;
+        do {
+            __u32 __min = std::min(__max, __acq);
+            std::println("__acquire {}", __min);
+            __shared_block_subrange __blk = __acquire(__min);
+            __buf_._M_push_back()         = __blk;
+            __iov_[__nv_++] = {.iov_base = __blk._M_base(), .iov_len = __blk.__len_};
+            __acq -= __min;
+        } while (__acq > 0);
+        __builtin_memset(&__msghdr_, 0, sizeof __msghdr_);
+        __msghdr_.msg_iov    = __iov_;
+        __msghdr_.msg_iovlen = __nv_;
 
-    auto await_resume() noexcept
-        -> std::variant<__object_wrapper<typename _Ts::value_type>...> {
-        auto __fn = [this]<std::size_t _Index>() noexcept -> void {
-            std::get<_Index>(__submit_).__fwd_.~__forward_stop_request();
-        };
-        (__fn.template operator()<_Indices>(), ...);
-        __fwd_.~__forward_stop_request();
-
-        return std::move(__result_);
+        __task_facade::__resume_ = __coro;
+        __task_facade::__register<&__suspend>(this);
+    }
+    auto await_resume() noexcept -> __await_resume_result {
+        std::println("__M_ == __param_ {} {}", __M_, __param_);
+        assert(__M_ == __param_);
+        __M_ = 0;
+        __await_resume_result __result;
+        __result.__prefix_ = __buf_._M_consume_front_while(
+            [&](__shared_block_subrange &__rng) noexcept -> bool {
+                if (__rng.__len_ > __param_) {
+                    __result.__suffix_ = __rng.__splice_prefix(__param_);
+                    __param_           = 0;
+                    return false;
+                }
+                __param_ -= __rng.__len_;
+                return true;
+            });
+        assert(__param_ == 0);
+        return __result;
     }
 };
-template <typename... _Ts> auto __async_scope(_Ts... __args)
-    -> __async_scope_awaiter<std::index_sequence_for<_Ts...>, _Ts...> {
-    return {std::move(__args)...};
-}
 
-auto __async_main() noexcept -> __awaitable<void> {
-    const int __result = co_await __plus(1, 2);
-    assert(__result == 1 + 2);
-    std::println("__async_main():     co_await __println(...);");
-    co_await __println("hello, world");
-    std::println(
-        "__async_main(): co_await "
-        "__async_scope(__println(...), "
-        "__yield_until_stop_request, "
-        "__yield_until_stop_request())");
-    auto __var = co_await __async_scope(
-        __yield(), __yield_until_stop_request(), __yield_until_stop_request());
-    assert(__var.index() == 0);
-    std::println("__async_main(): co_return");
+auto __receive_coro(int __rfd) noexcept -> __task<> {
+    std::println("__receive_coro");
+    __async_receive __recv{__rfd};
+    while (true) {
+        __recv.__param_ = 8;
+        auto __result   = co_await __recv;
+        std::move(__result)._M_print();
+    }
     co_return;
-}
+};
+
+struct __async_accept : public __ioring_task {
+    ::sockaddr_storage __addr_{};
+    ::socklen_t        __addrlen_ = sizeof(::sockaddr_storage);
+
+    static void __submit(__ioring_task *__base, ::io_uring_sqe &__sqe) noexcept {
+        auto *__op = static_cast<__async_accept *>(__base);
+        __builtin_memset(&__sqe, 0, sizeof __sqe);
+        __sqe.opcode       = IORING_OP_ACCEPT;
+        __sqe.fd           = __k_accept;
+        __sqe.addr         = __builtin_bit_cast(__u64, &__op->__addr_);
+        __sqe.off          = __builtin_bit_cast(__u64, &__op->__addrlen_);
+        __sqe.accept_flags = 0;
+        __sqe.ioprio       = IORING_ACCEPT_MULTISHOT;
+    }
+
+    static void __complete(__ioring_task *__base, const ::io_uring_cqe &__cqe) noexcept {
+        std::println("accept complete");
+        auto *__op = static_cast<__async_accept *>(__base);
+        __throw_error_code_if(__cqe.res < 0, -__cqe.res);
+        __async_spawn(__receive_coro(__cqe.res)).__task_->_M_do_execute();
+        if (!(__cqe.flags & IORING_CQE_F_MORE)) { __k_schd._M_submit(__op); }
+    }
+
+    __async_accept() noexcept : __ioring_task(_nttp_<__submit>, _nttp_<__complete>) {}
+};
 
 } // namespace
 
 auto main() -> int {
-    auto __awaitable = __async_main();
-    __awaitable.__coro_();
-    (void)std::getchar();
-    // __awaitable.__coro_();
-    while (not __pending_._M_empty()) {
-        auto __temp = std::move(__pending_);
-        while (auto *__task = __temp._M_pop_front()) __task->_M_execute();
-    }
-    std::println("finish");
+    __k_accept = ::socket(AF_INET, SOCK_STREAM, 0);
+    int __yes  = 1;
+    ::setsockopt(__k_accept, SOL_SOCKET, SO_REUSEADDR, &__yes, sizeof __yes);
+    ::sockaddr_in __addr{};
+    __builtin_memset(&__addr, 0, sizeof __addr);
+    __addr.sin_family      = AF_INET;
+    __addr.sin_port        = htons(8888);
+    __addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    ::bind(__k_accept, reinterpret_cast<const ::sockaddr *>(&__addr), sizeof __addr);
+    ::listen(__k_accept, SOMAXCONN);
+
+    __async_accept __accept;
+    __k_schd._M_submit(&__accept);
+    __k_schd._M_run_until_stop();
 }

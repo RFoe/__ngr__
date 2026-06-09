@@ -7,6 +7,7 @@
 #include <__ngr/__core/__throw_error_code_if.hpp>
 
 #include <asm-generic/types.h>
+#include <bits/types/struct_iovec.h>
 #include <sys/mman.h>
 
 namespace __ngr::inline __v0::__core::__memrc {
@@ -20,31 +21,48 @@ struct alignas(__GCC_DESTRUCTIVE_SIZE) __block {
     char __data_[];
 #pragma clang diagnostic pop
 };
+static_assert(__builtin_offsetof(__block, __data_) == __GCC_DESTRUCTIVE_SIZE);
 
-struct __span {
-    __block *__source_;
+struct __shared_block_subrange {
+    __block *__source_ = nullptr;
     __u32    __offset_;
-    __u32    __length_;
+    __u32    __len_;
+
+    [[__gnu__::__always_inline__, __gnu__::__artificial__, __nodiscard__]] //
+    inline auto __splice_prefix(__u32 __n) noexcept -> __shared_block_subrange {
+        __atomic_fetch_add(&__source_->__use_count_, 1, __ATOMIC_RELAXED);
+        return {
+            .__source_ = __source_,
+            .__offset_ = std::exchange(__offset_, __offset_ + __n),
+            .__len_    = __n};
+    }
+
+    [[__gnu__::__always_inline__, __gnu__::__artificial__, __nodiscard__]] //
+    inline auto _M_base() const noexcept -> char * {
+        return &__source_->__data_[__offset_];
+    }
+
+    [[__gnu__::__always_inline__, __gnu__::__artificial__, __nodiscard__]] //
+    inline auto _M_iovec() const noexcept -> ::iovec {
+        return {.iov_base = _M_base(), .iov_len = __len_};
+    }
 };
 
-static constexpr __u32 __T_ = 16;                 // local threshold for block count
+static constexpr __u32 __T_ = 16;
 static constexpr __u32 __N_ = 16;
 static constexpr __u32 __M_ = 64;
-static constexpr __u32 __K_ = __N_ * __M_ / __T_; // max threads
+static constexpr __u32 __K_ = __N_ * __M_ / __T_;
 static constexpr __u32 __V_ = __round_up(4096 + 4160 * __M_, 4096);
 
-// page:   4096
-// mmap:   (page | __block) * __M_
-// remote: mmap * 16
 struct __remote_source {
     std::atomic<__u32> __n_ = 0;
     void              *__mmap_[__N_]{};
 
     struct __atomic_block_queue {
-        __atomic_intrusive_queue<&__block::__next_> __blk_{};
-        std::atomic<__u32>                          __n_ = 0;
+        __atomic_intrusive_queue<&__block::__next_> __queue_{};
+        std::atomic<__u64>                          __n_ = 0;
     };
-    alignas(__GCC_DESTRUCTIVE_SIZE) __atomic_block_queue __queue_[__K_]{};
+    alignas(__GCC_DESTRUCTIVE_SIZE) __atomic_block_queue __ring_[__K_]{};
 
     struct __descriptor {
         __u32 __head_ = 0;
@@ -75,8 +93,9 @@ struct __remote_source {
                     std::memory_order_acquire)) [[__unlikely__]] {
                 continue;
             }
-            __atomic_block_queue                &__q = __queue_[__x.__tail_ & (__K_ - 1)];
-            __intrusive_queue<&__block::__next_> __r = __q.__blk_._M_pop_swap_reversed();
+            __atomic_block_queue                &__q = __ring_[__x.__tail_ & (__K_ - 1)];
+            __intrusive_queue<&__block::__next_> __r =
+                __q.__queue_._M_pop_swap_reversed();
             __q.__n_.store(0, std::memory_order_release);
             return __r;
         }
@@ -121,8 +140,8 @@ struct __remote_source {
         while (true) {
             __u64                 __u = __state_.load(std::memory_order_acquire);
             __descriptor          __x = __convert(__u);
-            __atomic_block_queue &__q = __queue_[__x.__head_ & (__K_ - 1)];
-            __u32                 __n = __q.__n_.load(std::memory_order_acquire);
+            __atomic_block_queue &__q = __ring_[__x.__head_ & (__K_ - 1)];
+            __u64                 __n = __q.__n_.load(std::memory_order_acquire);
 
             if (__n == __T_) [[__unlikely__]] { continue; }
             while (!__q.__n_.compare_exchange_weak(
@@ -132,7 +151,7 @@ struct __remote_source {
                     continue;
                 }
             }
-            __q.__blk_._M_push_front(__blk);
+            __q.__queue_._M_push_front(__blk);
             if (__n + 1 == __T_) [[__unlikely__]] {
                 __state_.fetch_add(__head_stride_, std::memory_order_release);
             }
@@ -146,8 +165,8 @@ struct __remote_source {
         while (!__blk._M_empty()) {
             __u64                 __u = __state_.load(std::memory_order_acquire);
             __descriptor          __x = __convert(__u);
-            __atomic_block_queue &__q = __queue_[__x.__head_ & (__K_ - 1)];
-            __u32                 __n = __q.__n_.load(std::memory_order_acquire);
+            __atomic_block_queue &__q = __ring_[__x.__head_ & (__K_ - 1)];
+            __u64                 __n = __q.__n_.load(std::memory_order_acquire);
 
             if (__n == __T_) [[__unlikely__]] { continue; }
             while (!__q.__n_.compare_exchange_weak(
@@ -157,20 +176,16 @@ struct __remote_source {
                     __n = __q.__n_.load(std::memory_order_acquire);
                 }
             }
-            // After the CAS above, `__n` is the value we replaced.
-            // If another thread concurrently filled this slot to __T_, the CAS
-            // may have no-op succeeded with __n == __T_, meaning __r == 0.
-            // Re-read state and pick a different slot in that case.
-            using __iterator = __intrusive_queue<&__block::__next_>::__iterator;
-            __u32 __r        = __T_ - __n;
-            if (__r == 0) [[__unlikely__]] { continue; }
+            if (__T_ == __n) [[__unlikely__]] { continue; }
+            using __iterator    = __intrusive_queue<&__block::__next_>::__iterator;
+            __u32    __r        = __T_ - __n;
             __block *__sentinel = (__k + __r < __M_) ? __ptr[__k + __r] : nullptr;
             __intrusive_queue<&__block::__next_> __tmp;
             __tmp._M_splice(
                 __tmp.end(), __blk, __blk.begin(),
                 __iterator{__ptr[__k + __r - 1], __sentinel});
 
-            __q.__blk_._M_prepend(std::move(__tmp));
+            __q.__queue_._M_prepend(std::move(__tmp));
             __state_.fetch_add(__head_stride_, std::memory_order_release);
             __k += __r;
         }
@@ -207,13 +222,13 @@ struct __local_source {
         --__count_;
     }
 
-    auto _M_acquire(__u32 __n) noexcept -> __span {
+    auto _M_acquire(__u32 __n) noexcept -> __shared_block_subrange {
         if (4096 - __bump_ < __n) [[__unlikely__]] { _M_allocate(); }
         __atomic_fetch_add(&__consume_->__use_count_, 1, __ATOMIC_RELAXED);
-        return __span{
+        return {
             .__source_ = __consume_,
             .__offset_ = std::exchange(__bump_, __bump_ + __n),
-            .__length_ = __n};
+            .__len_    = __n};
     };
 
     void _M_release(__block *__restrict__ __blk) noexcept {
@@ -229,23 +244,29 @@ struct __local_source {
 inline thread_local __local_source __k_local;
 
 [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
-inline auto __acquire(__u32 __n) noexcept -> __span {
+inline auto __acquire(__u32 __n) noexcept -> __shared_block_subrange {
     return __k_local._M_acquire(__n);
 }
 
 [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
-inline void __release(__span const &__x) noexcept {
+inline void __release(__shared_block_subrange const &__x) noexcept {
     if (__atomic_fetch_add(&__x.__source_->__use_count_, -1, __ATOMIC_ACQ_REL) == 1) {
         __k_local._M_release(__x.__source_);
     }
+}
+
+[[__gnu__::__always_inline__, __gnu__::__artificial__]] //
+inline auto __bump_suffix() noexcept -> __u32 {
+    return 4096 - __k_local.__bump_;
 }
 
 } // namespace __ngr::inline __v0::__core::__memrc
 
 namespace __ngr::inline __v0::__core {
 
-using __memrc::__span __attribute__((__using_if_exists__));
+using __memrc::__shared_block_subrange __attribute__((__using_if_exists__));
 using __memrc::__release __attribute__((__using_if_exists__));
 using __memrc::__acquire __attribute__((__using_if_exists__));
+using __memrc::__bump_suffix __attribute__((__using_if_exists__));
 
 } // namespace __ngr::inline __v0::__core

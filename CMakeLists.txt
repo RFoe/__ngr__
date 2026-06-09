@@ -5,7 +5,7 @@ set (PROJECT_DESCRIPTION "ngr" CACHE STRING "project description")
 set_property (GLOBAL PROPERTY USE_FOLDERS ON)
 
 set (CMAKE_BUILD_TYPE Debug CACHE STRING "build type" FORCE)
-set (__SANTINIZER__ "-fsanitize=thread")
+set (__SANTINIZER__ "-fsanitize=address,undefined")
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     set (CMAKE_EXE_LINKER_FLAGS_DEBUG
          "${CMAKE_EXE_LINKER_FLAGS_DEBUG} ${__SANTINIZER__}"

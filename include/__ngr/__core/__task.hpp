@@ -11,8 +11,8 @@
 #include <__ngr/__core/__aligned_storage.hpp>
 #include <__ngr/__core/__allocator.hpp>
 #include <__ngr/__core/__coro_destroy.hpp>
-#include <__ngr/__core/__generic_task.hpp>
 #include <__ngr/__core/__stop_inplace.hpp>
+#include <__ngr/__core/__task_facade.hpp>
 
 // NOLINTBEGIN(*-special-member-functions)
 // NOLINTBEGIN(cert-dcl54-cpp, *-new-delete-overloads, *-new-delete-operators)
@@ -33,28 +33,27 @@ struct __promise_base {
     };
 
     using __forward_stop_request = __stop_callback<__forward_stop_request<>>;
-    std::coroutine_handle<> __continuation_ = std::noop_coroutine();
-    __stop_source           __source_{};
+    std::coroutine_handle<>                   __continuation_ = std::noop_coroutine();
+    __stop_source                             __source_{};
     __aligned_storage<__forward_stop_request> __fwd_;
     static auto initial_suspend() noexcept -> std::suspend_always { return {}; }
     static auto final_suspend() noexcept -> __final_awaiter { return {}; }
 
-    template <typename _Promise> void
-    _M_on_await_suspend(std::coroutine_handle<_Promise> __parent) noexcept {
+    template <typename _Promise>
+    void _M_on_await_suspend(std::coroutine_handle<_Promise> __parent) noexcept {
         __continuation_ = __parent;
-        __fwd_._M_construct(
-            __parent.promise().__source_._M_get_stop_token(), __source_);
+        __fwd_._M_construct(__parent.promise().__source_._M_get_stop_token(), __source_);
     }
 };
-template <typename _Ty = void> struct __promise_storage {
+template <typename _Ty = void> struct __promise_generic_storage {
     enum struct _Sg : unsigned char { _S_none, _S_error, _S_result };
     __extension__ union {
         std::exception_ptr __error_;
         _Ty                __result_;
     };
     _Sg __state_;
-    __promise_storage() noexcept : __state_(_Sg::_S_none) {}
-    ~__promise_storage() noexcept {
+    __promise_generic_storage() noexcept : __state_(_Sg::_S_none) {}
+    ~__promise_generic_storage() noexcept {
         switch (__state_) {
         case _Sg::_S_none: __builtin_unreachable();
         case _Sg::_S_error:
@@ -62,14 +61,11 @@ template <typename _Ty = void> struct __promise_storage {
             __error_.std::exception_ptr::~exception_ptr();
             return;
         case _Sg::_S_result:
-            if constexpr (!std::is_trivially_destructible_v<_Ty>) {
-                __result_.~_Ty();
-            }
+            if constexpr (!std::is_trivially_destructible_v<_Ty>) { __result_.~_Ty(); }
             return;
         }
     }
-    template <typename _Uy = _Ty>
-    constexpr void return_value(_Uy &&__r) noexcept {
+    template <typename _Uy = _Ty> constexpr void return_value(_Uy &&__r) noexcept {
         ::new (&__result_) _Ty{std::forward<_Uy>(__r)};
         __state_ = _Sg::_S_result;
     }
@@ -90,7 +86,7 @@ template <typename _Ty = void> struct __promise_storage {
         }
     }
 };
-template <> struct __promise_storage<void> {
+template <> struct __promise_generic_storage<void> {
     std::exception_ptr __except_;
     constexpr void     return_void() noexcept {}
     // NOLINTNEXTLINE(performance-unnecessary-value-param)
@@ -109,13 +105,11 @@ struct __promise_new_delete {
     inline static auto __alloc_address(void *__fr, std::size_t __n) noexcept
         -> __allocator ** {
         char *__r = static_cast<char *>(__fr) + __n;        // NOLINT
-        return reinterpret_cast<__allocator **>(
-            __round_up(__r, alignof(__allocator *)));
+        return reinterpret_cast<__allocator **>(__round_up(__r, alignof(__allocator *)));
     }
 
     [[__gnu__::__always_inline__, __gnu__::__artificial__]] //
-    inline static auto __allocate_size(std::size_t __n) noexcept
-        -> std::size_t {
+    inline static auto __allocate_size(std::size_t __n) noexcept -> std::size_t {
         return __round_up(__n, alignof(__allocator *)) + sizeof(__allocator *);
     }
 
@@ -130,7 +124,7 @@ struct __promise_new_delete {
             __pa = __k_tls_alloc;
         }
 
-        void *__r = __pa->_M_push_stack_frame(__allocate_size(__n));
+        void *__r                  = __pa->_M_push_stack_frame(__allocate_size(__n));
         *__alloc_address(__r, __n) = __top_frame ? __pa : nullptr;
         return __r;
     }
@@ -149,8 +143,8 @@ struct __promise_new_delete {
     }
 };
 
-template <typename _Ty = void, typename _Alloc = __allocator>
-struct [[__nodiscard__]] __task {
+template <typename _Ty = void, typename _Alloc = __allocator> struct [[__nodiscard__]]
+__task {
     struct __promise;
     struct __awaiter;
     using __value      = _Ty;
@@ -159,8 +153,7 @@ struct [[__nodiscard__]] __task {
     std::coroutine_handle<__promise> __coro_{};
 
     __task(std::coroutine_handle<__promise> __h) noexcept : __coro_(__h) {}
-    __task(__task &&__other) noexcept
-        : __coro_(std::exchange(__other.__coro_, {})) {}
+    __task(__task &&__other) noexcept : __coro_(std::exchange(__other.__coro_, {})) {}
     auto operator=(__task &&__that) noexcept -> __task & = delete;
 
     ~__task() noexcept {
@@ -186,18 +179,16 @@ struct [[__nodiscard__]] __task {
         [[__nodiscard__]] auto await_resume() -> _Ty {
             auto &__promise = __child_.__coro_.promise();
             __promise._M_throw_uncaught();
-            if constexpr (!std::is_void_v<_Ty>) {
-                return __promise._M_result();
-            }
+            if constexpr (!std::is_void_v<_Ty>) { return __promise._M_result(); }
         }
     };
 
     struct __promise final
-        : public __promise_storage<_Ty>
+        : public __promise_generic_storage<_Ty>
         , public __promise_new_delete
         , public __promise_base {
         void unhandled_exception() noexcept {
-            __promise_storage<_Ty>::_M_set_exception(std::current_exception());
+            __promise_generic_storage<_Ty>::_M_set_exception(std::current_exception());
         }
         auto get_return_object() noexcept -> __task {
             return {std::coroutine_handle<__promise>::from_promise(*this)};
