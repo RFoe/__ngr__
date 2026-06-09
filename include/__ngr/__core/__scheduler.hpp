@@ -14,10 +14,10 @@
 
 #include <__ngr/__core/__atomic_segment_array.hpp>
 #include <__ngr/__core/__file_descriptor.hpp>
-#include <__ngr/__core/__generic_task.hpp>
 #include <__ngr/__core/__intrusive_heap.hpp>
 #include <__ngr/__core/__memory_mapped_region.hpp>
 #include <__ngr/__core/__stop_inplace.hpp>
+#include <__ngr/__core/__task_facade.hpp>
 #include <__ngr/__core/__throw_error_code_if.hpp>
 
 // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
@@ -82,6 +82,7 @@ inline void __io_uring_register_eventfd_async(int __rfd, int __efd) {
     __throw_error_code_if(__rc < 0, -errno);
 }
 
+#if 0 // NOLINT
 [[__gnu__::__always_inline__, __gnu__::__artificial__]]
 inline void __io_uring_register_napi_busy_loop(int __rfd, __u32 __us) {
     ::io_uring_napi __napi{};
@@ -91,6 +92,7 @@ inline void __io_uring_register_napi_busy_loop(int __rfd, __u32 __us) {
         ::syscall(__NR_io_uring_register, __rfd, IORING_REGISTER_NAPI, &__napi, 1));
     __throw_error_code_if(__rc < 0, -errno);
 }
+#endif
 
 [[__gnu__::__always_inline__, __gnu__::__artificial__, __nodiscard__]]
 inline auto __map_region(int __fd, ::off_t __offset, std::size_t __size)
@@ -120,51 +122,110 @@ inline auto __at_offset_as(void *__base, __u32 __offset) noexcept -> _Ty {
 }
 // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
 
-template <typename _Ty> struct __wrapper {
-    consteval __wrapper(_Ty __v) noexcept : __v_(__v) {}
-    _Ty __v_;
+template <typename> struct __fnwrap_submit;
+template <typename _Ty>
+struct __fnwrap_submit<void (*)(_Ty *, ::io_uring_sqe &) noexcept> {
+    using __signature = void (*)(_Ty *, ::io_uring_sqe &) noexcept;
+    using __arg       = _Ty;
+    consteval __fnwrap_submit(__signature __v) noexcept : __fp_(__v) {}
+    __signature __fp_;
 };
-template <__wrapper _Vp> struct __nttp {};
-template <__wrapper _Vp> inline constexpr __nttp<_Vp> _nttp_{};
+template <typename _Ty> __fnwrap_submit(void (*)(_Ty *, ::io_uring_sqe &) noexcept)
+    -> __fnwrap_submit<void (*)(_Ty *, ::io_uring_sqe &) noexcept>;
 
-struct __io_uring_task : __generic_task {
+template <typename> struct __fnwrap_complete;
+template <typename _Ty>
+struct __fnwrap_complete<void (*)(_Ty *, const ::io_uring_cqe &) noexcept> {
+    using __signature = void (*)(_Ty *, const ::io_uring_cqe &) noexcept;
+    using __arg       = _Ty;
+    consteval __fnwrap_complete(__signature __v) noexcept : __fp_(__v) {}
+    __signature __fp_;
+};
+template <typename _Ty>
+__fnwrap_complete(void (*)(_Ty *, const ::io_uring_cqe &) noexcept)
+    -> __fnwrap_complete<void (*)(_Ty *, const ::io_uring_cqe &) noexcept>;
+
+template <__fnwrap_submit, __fnwrap_complete> struct __nttp {};
+template <__fnwrap_submit _Swrap, __fnwrap_complete _Cwrap>
+inline constexpr __nttp<_Swrap, _Cwrap> _nttp_{};
+
+struct __ioring_task_base : __task_facade {
     enum class _Sg : unsigned char { _S_submit, _S_complete };
     __extension__ union __params {
         ::io_uring_sqe       *__sqe_;
         const ::io_uring_cqe *__cqe_;
     } __attribute__((__trivial_abi__));
-    void (*__virt_)(__io_uring_task *, const _Sg, __params) noexcept;
-    template <__wrapper __submit_, __wrapper __complete_>
-    static void __manage(__io_uring_task *__x, const _Sg __op, __params __p) noexcept {
-        switch (__op) {
-        case _Sg::_S_submit:   (__submit_.__v_)(__x, *__p.__sqe_); return;
-        case _Sg::_S_complete: (__complete_.__v_)(__x, *__p.__cqe_); return;
+    using __virtual_fn   = void (*)(__ioring_task_base *, _Sg, __params) noexcept;
+    __virtual_fn __virt_ = nullptr;
+
+    template <__fnwrap_submit __submit_, __fnwrap_complete __complete_> //
+    static void __manage(__ioring_task_base *__base, _Sg __do, __params __pa) noexcept {
+        auto *__op = static_cast<decltype(__submit_)::__arg *>(__base);
+        switch (__do) {
+        case _Sg::_S_submit:   (__submit_.__fp_)(__op, *__pa.__sqe_); return;
+        case _Sg::_S_complete: (__complete_.__fp_)(__op, *__pa.__cqe_); return;
         }
     }
-    void _M_submit(::io_uring_sqe &__sqe) noexcept {
-        __params __p{.__sqe_ = &__sqe};
-        (*this->__virt_)(this, _Sg::_S_submit, __p);
-    }
-    void _M_complete(const ::io_uring_cqe &__cqe) noexcept {
-        __params __p{.__cqe_ = &__cqe};
-        (*this->__virt_)(this, _Sg::_S_complete, __p);
-    }
-    template <__wrapper __submit_, __wrapper __complete_>
-    __io_uring_task(__nttp<__submit_>, __nttp<__complete_>) noexcept
-        : __virt_(&__manage<__submit_, __complete_>) {}
+    __ioring_task_base(__virtual_fn __fn) noexcept : __virt_(__fn) {}
 };
-struct __generic_timer_task : __generic_task {
+
+struct __ioring_task : __ioring_task_base {
+    std::atomic<int> __n_ops_ = 0;
+    void             _M_submit(::io_uring_sqe &__sqe) noexcept {
+        __n_ops_.store(1, std::memory_order_relaxed);
+        (*this->__virt_)(this, _Sg::_S_submit, {.__sqe_ = &__sqe});
+    }
+    auto _M_complete(const ::io_uring_cqe &__cqe) noexcept -> int {
+        bool __more = (__cqe.flags & IORING_CQE_F_MORE) != 0U;
+        if ((__more && __n_ops_.load(std::memory_order_acquire) == 1) ||
+            __n_ops_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            (*this->__virt_)(this, _Sg::_S_complete, {.__cqe_ = &__cqe});
+        }
+        return static_cast<int>(!__more);
+    }
+    template <__fnwrap_submit __submit_, __fnwrap_complete __complete_>
+    __ioring_task(__nttp<__submit_, __complete_>) noexcept
+        : __ioring_task_base(&__manage<__submit_, __complete_>) {}
+};
+inline void __manual_stop(__ioring_task *__op) noexcept {
+    ::io_uring_cqe __cqe{};
+    __cqe.res       = -ECANCELED;
+    __cqe.user_data = std::bit_cast<__u64>(__op);
+    __op->_M_complete(__cqe);
+}
+struct __ioring_stop_inplace : __ioring_task_base {
+    static void __submit(__ioring_stop_inplace *__op, ::io_uring_sqe &__sqe) noexcept {
+        __builtin_memset(&__sqe, 0, sizeof __sqe);
+        __sqe.opcode = IORING_OP_ASYNC_CANCEL;
+        __sqe.addr   = __builtin_bit_cast(__u64, __op->__target_);
+    }
+    static void __complete(__ioring_stop_inplace *__op, const ::io_uring_cqe &) noexcept {
+        auto *__target = static_cast<__ioring_task *>(__op->__target_);
+        if (__target->__n_ops_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+            __manual_stop(__target);
+        }
+    }
+
+    __ioring_stop_inplace(__ioring_task *__op) noexcept
+        : __ioring_task_base(&__manage<&__submit, &__complete>) {
+        __task_facade::__target_ = __op;
+    }
+    void operator()() noexcept {}
+};
+
+struct __timer_task_base : __task_facade {
     enum class _Sg : unsigned char { _S_schedule, _S_stop };
-    _Sg  __cmd_;
-    bool __stop_ = false;
+    _Sg __cmd_;
+
+    __timer_task_base(_Sg __c) noexcept : __cmd_(__c) {}
 };
-struct __timer_task : __generic_timer_task {
+struct __timer_task : __timer_task_base {
     using __clock [[__gnu__::__nodebug__]]      = std::chrono::steady_clock;
     using __time_point [[__gnu__::__nodebug__]] = __clock::time_point;
 
     struct __time_sequence {
         __time_point __deadline_{};
-        std::size_t  __seq_{};
+        __u64        __seq_{};
 
         friend auto
         operator<(__time_sequence const &__a, __time_sequence const &__b) noexcept
@@ -173,32 +234,26 @@ struct __timer_task : __generic_timer_task {
                    (!(__b.__deadline_ < __a.__deadline_) && __a.__seq_ < __b.__seq_);
         }
     };
-    __timer_task   *__prev_  = nullptr;
-    __timer_task   *__left_  = nullptr;
-    __timer_task   *__right_ = nullptr;
-    __time_sequence __key_{};
-    void (*__complete_)(__timer_task *) noexcept = nullptr;
+    inline static std::atomic<__u64> __next_seq_ = 0;
+    __timer_task                    *__prev_     = nullptr;
+    __timer_task                    *__left_     = nullptr;
+    __timer_task                    *__right_    = nullptr;
+    __time_sequence                  __key_{};
 
-    void _M_complete() noexcept { (*this->__complete_)(this); }
-    void _M_stop() noexcept {
-        __stop_ = true;
-        (*this->__complete_)(this);
-    }
+    using __complete_fn = void (*)(__timer_task *, bool) noexcept;
+    __complete_fn __complete_;
+
+    void _M_complete() noexcept { (*this->__complete_)(this, false); }
+    void _M_stop() noexcept { (*this->__complete_)(this, true); }
+
+    __timer_task(const __time_point &__tp, __complete_fn __fn) noexcept
+        : __timer_task_base(_Sg::_S_schedule),
+          __key_(__tp, __next_seq_.fetch_add(1, std::memory_order_relaxed)),
+          __complete_(__fn) {}
 };
-
-using __timer_heap [[__gnu__::__nodebug__]] = __intrusive_heap<
-    &__timer_task::__key_, &__timer_task::__prev_, &__timer_task::__left_,
-    &__timer_task::__right_>;
-
-inline void __manual_stop(__io_uring_task *__op) noexcept {
-    ::io_uring_cqe __cqe{};
-    __cqe.res       = -ECANCELED;
-    __cqe.user_data = std::bit_cast<__u64>(__op);
-    __op->_M_complete(__cqe);
-}
-inline void __manual_stop(__generic_timer_task *__op) noexcept {
+inline void __manual_stop(__timer_task_base *__op) noexcept {
     switch (__op->__cmd_) {
-        using _Sg [[__gnu__::__nodebug__]] = __generic_timer_task::_Sg;
+        using _Sg [[__gnu__::__nodebug__]] = __timer_task_base::_Sg;
     case _Sg::_S_schedule: static_cast<__timer_task *>(__op)->_M_stop(); break;
     case _Sg::_S_stop:     {
         static_cast<__timer_task *>(__op->__target_)->_M_stop();
@@ -206,6 +261,14 @@ inline void __manual_stop(__generic_timer_task *__op) noexcept {
     }
     }
 }
+struct __timer_stop_inplace : __timer_task_base {
+    __timer_stop_inplace(__timer_task *__op) noexcept : __timer_task_base(_Sg::_S_stop) {
+        __task_facade::__target_ = __op;
+    }
+};
+using __timer_heap [[__gnu__::__nodebug__]] = __intrusive_heap<
+    &__timer_task::__key_, &__timer_task::__prev_, &__timer_task::__left_,
+    &__timer_task::__right_>;
 
 struct __submission_queue {
     std::atomic_ref<__u32> __head_;
@@ -225,16 +288,16 @@ struct __submission_queue {
           __n_slot_{__p.sq_entries} {}
 
     auto _M_submit(__task_queue &__queue, __u32 __max, bool __stop) noexcept -> __u32 {
-        __u32 __tail          = __tail_.load(std::memory_order_relaxed);
-        __u32 __head          = __head_.load(std::memory_order_acquire);
-        __u32 __n             = __tail - __head;
-        __u32 __r             = 0;
-        __max                 = __umin(__max, __n_slot_ - __n);
-        __io_uring_task *__op = nullptr;
+        __u32 __tail        = __tail_.load(std::memory_order_relaxed);
+        __u32 __head        = __head_.load(std::memory_order_acquire);
+        __u32 __n           = __tail - __head;
+        __u32 __r           = 0;
+        __max               = __umin(__max, __n_slot_ - __n);
+        __ioring_task *__op = nullptr;
         while (!__queue._M_empty() && __r < __max) {
             __u32           __m   = __tail & __mask_;
             ::io_uring_sqe &__sqe = __sqe_[__m];
-            __op = static_cast<__io_uring_task *>(__queue._M_pop_front());
+            __op                  = static_cast<__ioring_task *>(__queue._M_pop_front());
             __op->_M_submit(__sqe_[__m]);
             __stop = __stop && __sqe.opcode != IORING_OP_ASYNC_CANCEL;
             if (__stop) {
@@ -271,10 +334,9 @@ struct __completion_queue {
         while (__head != __tail) {
             __u32                 __m   = __head & __mask_;
             const ::io_uring_cqe &__cqe = __cqe_[__m];
-            auto *__op = std::bit_cast<__io_uring_task *>(__cqe.user_data);
-            __op->_M_complete(__cqe);
+            auto                 *__op  = std::bit_cast<__ioring_task *>(__cqe.user_data);
+            __n += __op->_M_complete(__cqe);
             ++__head;
-            ++__n;
             __tail = __tail_.load(std::memory_order_acquire);
         }
         __head_.store(__head, std::memory_order_release);
@@ -318,7 +380,7 @@ struct __scheduler_base {
             __cq_region_ = __map_region(__ringfd_.__fd_, IORING_OFF_CQ_RING, __n_cq);
         }
         __io_uring_register_eventfd_async(__ringfd_.__fd_, __eventfd_.__fd_);
-        __io_uring_register_napi_busy_loop(__ringfd_.__fd_, 50);
+        // __io_uring_register_napi_busy_loop(__ringfd_.__fd_, 50);
     }
 };
 struct __scheduler : __scheduler_base {
@@ -385,13 +447,13 @@ struct __scheduler : __scheduler_base {
         __task_queue __tmp = std::move(__dr_pending_);
         if (__stop) {
             while (!__tmp._M_empty()) {
-                __manual_stop(static_cast<__generic_timer_task *>(__tmp._M_pop_front()));
+                __manual_stop(static_cast<__timer_task_base *>(__tmp._M_pop_front()));
             }
         } else {
             while (!__tmp._M_empty()) {
-                auto *__op = static_cast<__generic_timer_task *>(__tmp._M_pop_front());
+                auto *__op = static_cast<__timer_task_base *>(__tmp._M_pop_front());
                 switch (__op->__cmd_) {
-                    using _Sg [[__gnu__::__nodebug__]] = __generic_timer_task::_Sg;
+                    using _Sg [[__gnu__::__nodebug__]] = __timer_task_base::_Sg;
                 case _Sg::_S_schedule:
                     [[__likely__]] __heap_._M_push(static_cast<__timer_task *>(__op));
                     break;
@@ -411,7 +473,7 @@ struct __scheduler : __scheduler_base {
         _M_io_uring_submit(__source_._M_stop_requested());
     }
 
-    void _M_submit(__io_uring_task *__op) noexcept { __io_pending_._M_push_front(__op); }
+    void _M_submit(__ioring_task *__op) noexcept { __io_pending_._M_push_front(__op); }
     void _M_submit(__atomic_task_queue *__request, auto *__op) {
         int __n = 0;
         while (__n != __no_new_submit_ &&
